@@ -111,6 +111,13 @@ interface Soldier {
   rig: ProcRig | null;
   bones: BoneRig | null;
   wkind: WKind;
+  mixer: THREE.AnimationMixer | null;
+  actions: {
+    idle: THREE.AnimationAction | null;
+    walk: THREE.AnimationAction | null;
+    run: THREE.AnimationAction | null;
+  };
+  band: "idle" | "walk" | "run";
   hitMeshes: THREE.Mesh[];
   hp: number;
   maxHp: number;
@@ -1464,6 +1471,9 @@ export class GameEngine {
       visual: new THREE.Group(),
       rig: null,
       bones: null,
+      mixer: null,
+      actions: { idle: null, walk: null, run: null },
+      band: "idle",
       wkind: pickWeaponKind(team, etype, nameIdx),
       hitMeshes: [],
       hp: maxHp,
@@ -1590,7 +1600,6 @@ export class GameEngine {
     if (b.foreR) b.foreR.rotation.z = -0.12;
     if (b.foreL) b.foreL.rotation.z = 0.12;
     s.bones = b;
-    this.attachSoldierWeapon(s);
   }
 
   private updateBones(b: BoneRig, dt: number, speed: number, aiming: boolean, isRunner: boolean) {
@@ -1601,18 +1610,18 @@ export class GameEngine {
     const a = b.aimK;
     const w = 1 - a;
     if (b.legL && b.legR) {
-      b.legL.rotation.x = sw * 0.8 * k * w + a * 0.05;
-      b.legR.rotation.x = -sw * 0.8 * k * w - a * 0.12;
+      b.legL.rotation.x = sw * 0.5 * k * w + a * 0.05;
+      b.legR.rotation.x = -sw * 0.5 * k * w - a * 0.1;
     }
     if (b.kneeL && b.kneeR) {
-      b.kneeL.rotation.x = Math.max(0, -sw) * 1.0 * k * w + a * 0.1;
-      b.kneeR.rotation.x = Math.max(0, sw) * 1.0 * k * w + a * 0.25;
+      b.kneeL.rotation.x = Math.max(0, -sw) * 0.65 * k * w + a * 0.1;
+      b.kneeR.rotation.x = Math.max(0, sw) * 0.65 * k * w + a * 0.22;
     }
-    if (b.hips) b.hips.position.y = b.hipsY + Math.abs(Math.cos(b.phase)) * 0.05 * k * w;
-    if (b.chest) b.chest.rotation.x = (0.12 * k + sw * 0.02 * k) * w + 0.06 * a;
+    if (b.hips) b.hips.position.y = b.hipsY + Math.abs(Math.cos(b.phase)) * 0.035 * k * w;
+    if (b.chest) b.chest.rotation.x = (0.1 * k + sw * 0.02 * k) * w + 0.06 * a;
     if (b.head) b.head.rotation.x = -0.08 * a;
     if (b.armL && b.armR) {
-      const amp = 0.6 * k * w;
+      const amp = 0.42 * k * w;
       b.armL.rotation.x = -sw * amp - 1.1 * a;
       b.armR.rotation.x = sw * amp - 0.5 * a - b.recoil;
       b.armL.rotation.z = 1.3 * w + 0.55 * a;
@@ -1630,26 +1639,24 @@ export class GameEngine {
     b.recoil *= Math.exp(-13 * dt);
   }
 
-  /* ---------- سلاح سربازها ---------- */
+  /* ---------- تعویض نرم انیمیشن Mixamo ---------- */
 
-  private attachSoldierWeapon(s: Soldier) {
-    const w = this.makeSoldierWeapon(s.wkind);
-    if (s.bones) {
-      const holder = s.bones.handR ?? s.bones.foreR;
-      if (holder) {
-        w.rotation.x = Math.PI / 2; // لوله هم‌راستای انگشت‌ها
-        w.position.set(0, 0.05, 0.02);
-        holder.add(w);
-        return;
+  private setBand(s: Soldier, band: Soldier["band"]) {
+    s.band = band;
+    for (const key of ["idle", "walk", "run"] as const) {
+      const a = s.actions[key];
+      if (!a) continue;
+      if (key === band) {
+        a.enabled = true;
+        a.setEffectiveTimeScale(1);
+        a.fadeIn(0.22);
+      } else {
+        a.fadeOut(0.22);
       }
     }
-    if (s.rig) {
-      for (const c of s.rig.gun.children) if (c !== s.rig.muzzle) c.visible = false;
-      w.rotation.y = Math.PI;
-      w.position.set(0, 0, 0.28);
-      s.rig.gun.add(w);
-    }
   }
+
+  /* ---------- سلاح سربازها (نسخه‌ی رویه‌ساز) ---------- */
 
   private makeSoldierWeapon(kind: WKind): THREE.Group {
     const slot: SlotName = kind === "pistol" ? "wpn-pistol" : kind === "knife" ? "wpn-knife" : "wpn-ak";
@@ -1744,8 +1751,29 @@ export class GameEngine {
           }
         }
       });
-      // انیمیشن مستقیم روی استخوان‌ها — تی‌پوز دیگر ممکن نیست
+      // حالت استراحت استخوان‌ها (ضد تی‌پوز) + ریگ پشتیبان
       this.setupBones(s, model);
+
+      // انیمیشن واقعی Mixamo — کلیپ‌های Idle/Walk/Run از همان parse
+      const clips = (g.animations as THREE.AnimationClip[]).filter(
+        (c) => c.tracks.length > 8 && !/tpose|t-?_?pose/i.test(c.name)
+      );
+      const find = (n: string) =>
+        clips.find((c) => c.name.toLowerCase() === n) ?? clips.find((c) => c.name.toLowerCase().includes(n));
+      const idle = find("idle");
+      const walk = find("walk");
+      const run = find("run");
+      if (idle && walk && run) {
+        s.mixer = new THREE.AnimationMixer(model);
+        s.actions.idle = s.mixer.clipAction(idle);
+        s.actions.walk = s.mixer.clipAction(walk);
+        s.actions.run = s.mixer.clipAction(run);
+        s.actions.idle.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(1).play();
+        s.actions.walk.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
+        s.actions.run.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
+        s.band = "idle";
+        s.mixer.update(0.016);
+      }
     } catch {
       if (!s.rig && !s.gone) this.attachProcedural(s);
     }
@@ -2195,9 +2223,13 @@ export class GameEngine {
       }
     }
 
-    // انیمیشن — استخوان‌های دانلودی یا ریگ رویه‌ساز
+    // انیمیشن — اول کلیپ واقعی Mixamo، بعد ریگ استخوانی، بعد رویه‌ساز
     const aimingNow = shooting && (s.los || dist < 14);
-    if (s.bones) {
+    if (s.mixer) {
+      const band: Soldier["band"] = s.speed < 0.4 ? "idle" : s.speed < (s.etype === "runner" ? 4.5 : 3.1) ? "walk" : "run";
+      if (band !== s.band) this.setBand(s, band);
+      s.mixer.update(dt);
+    } else if (s.bones) {
       this.updateBones(s.bones, dt, s.speed, aimingNow, s.etype === "runner");
     } else if (s.rig) {
       animateProcedural(s.rig, s.speed, dt, aimingNow);
