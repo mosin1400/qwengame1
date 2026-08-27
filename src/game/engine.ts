@@ -66,6 +66,14 @@ export interface HudState {
   bannerText: string;
   bannerKind: "wave" | "streak" | "info";
   stats: FinalStats | null;
+  money: number;
+  buyOpen: boolean;
+  scoping: boolean;
+  best: number;
+  ownedPrimaries: PrimaryId[];
+  primaryId: PrimaryId;
+  dmgDirs: Array<{ id: number; deg: number }>;
+  storm: boolean;
 }
 
 type EType = "rifle" | "runner" | "heavy";
@@ -198,6 +206,8 @@ interface WeaponDef {
   name: string;
   auto: boolean;
   melee?: boolean;
+  scoped?: boolean;
+  pellets?: number;
   rof: number;
   mag: number;
   reload: number;
@@ -210,10 +220,38 @@ interface WeaponDef {
   range: number;
 }
 
+export type PrimaryId = "ak" | "mp5" | "shotgun" | "awp";
+
+const PRIMARY_DEFS: Record<PrimaryId, WeaponDef> = {
+  ak: { name: "کلاشینکف AK-47", auto: true, rof: 0.105, mag: 30, reload: 2.1, spread: 0.0035, heatAdd: 0.13, kick: 1.7, dmg: 28, head: 110, leg: 21, range: 220 },
+  mp5: { name: "مسلسل MP5", auto: true, rof: 0.075, mag: 30, reload: 1.8, spread: 0.003, heatAdd: 0.1, kick: 1.2, dmg: 22, head: 88, leg: 17, range: 180 },
+  shotgun: { name: "شاتگان M3", auto: false, pellets: 8, rof: 0.85, mag: 6, reload: 2.6, spread: 0.022, heatAdd: 0.25, kick: 3.2, dmg: 15, head: 46, leg: 12, range: 60 },
+  awp: { name: "اسنایپر AWP", auto: false, scoped: true, rof: 1.35, mag: 5, reload: 3.0, spread: 0.02, heatAdd: 0.3, kick: 4.5, dmg: 115, head: 280, leg: 90, range: 400 },
+};
+
 const WEAPONS: WeaponDef[] = [
-  { name: "کلاشینکف AK-47", auto: true, rof: 0.105, mag: 30, reload: 2.1, spread: 0.0035, heatAdd: 0.13, kick: 1.7, dmg: 28, head: 110, leg: 21, range: 220 },
+  PRIMARY_DEFS.ak,
   { name: "کلت M9", auto: false, rof: 0.24, mag: 12, reload: 1.3, spread: 0.0022, heatAdd: 0.07, kick: 1.1, dmg: 24, head: 80, leg: 18, range: 180 },
   { name: "چاقوی رزمی", auto: false, melee: true, rof: 0.45, mag: 0, reload: 0, spread: 0, heatAdd: 0, kick: 0, dmg: 90, head: 90, leg: 90, range: 2.8 },
+];
+
+/** فروشگاه — قیمت‌ها به دلار کانتر */
+export interface BuyItem {
+  id: string;
+  label: string;
+  price: number;
+  kind: "primary" | "gear";
+  primary?: PrimaryId;
+  desc: string;
+}
+
+export const BUY_ITEMS: BuyItem[] = [
+  { id: "mp5", label: "مسلسل MP5", price: 1500, kind: "primary", primary: "mp5", desc: "نرخ آتش بالا، پس‌زدن کم" },
+  { id: "shotgun", label: "شاتگان M3", price: 1800, kind: "primary", primary: "shotgun", desc: "۸ ساچمه — مرگبار در نزدیک" },
+  { id: "awp", label: "اسنایپر AWP", price: 4750, kind: "primary", primary: "awp", desc: "تک‌تیرانداز — با کلیک‌راست اسکوپ" },
+  { id: "vest", label: "زره + کلاه", price: 1000, kind: "gear", desc: "زره کامل ۱۰۰" },
+  { id: "ammo", label: "شارژ مهمات", price: 500, kind: "gear", desc: "پر کردن ذخیره‌ی همه‌ی سلاح‌ها" },
+  { id: "he", label: "نارنجک HE", price: 300, kind: "gear", desc: "+۱ نارنجک (حداکثر ۵)" },
 ];
 
 const ZONES = {
@@ -283,6 +321,35 @@ export class GameEngine {
   private fov = 74;
   private knifeT = -1;
 
+  // اقتصاد و سلاح‌های اصلی
+  private money = 800;
+  private buyOpen = false;
+  private best = 0;
+  private primaryId: PrimaryId = "ak";
+  private ownedPrimaries = new Set<PrimaryId>(["ak"]);
+  private primaryAmmo: Record<PrimaryId, { mag: number; reserve: number }> = {
+    ak: { mag: 30, reserve: 120 },
+    mp5: { mag: 30, reserve: 0 },
+    shotgun: { mag: 6, reserve: 0 },
+    awp: { mag: 5, reserve: 0 },
+  };
+  private primaryGroup = new THREE.Group();
+  private primaryBodies: Record<PrimaryId, THREE.Group> | null = null;
+  private primaryMuzzles: Record<PrimaryId, THREE.Object3D> | null = null;
+  private scoping = false;
+  private scopeT = 0;
+
+  // افکت‌های جدید
+  private dmgDirs: Array<{ id: number; deg: number }> = [];
+  private dmgDirId = 1;
+  private storm = false;
+  private stormK = 0;
+  private shells: Array<{ m: THREE.Mesh; vel: THREE.Vector3; spin: THREE.Vector3; life: number }> = [];
+  private shellGeo = new THREE.BoxGeometry(0.02, 0.02, 0.06);
+  private shellMat = new THREE.MeshStandardMaterial({ color: 0xd8a848, roughness: 0.4, metalness: 0.7 });
+  private dmgNums: Array<{ s: THREE.Sprite; life: number; vy: number }> = [];
+  private radarPings: Array<{ x: number; z: number; life: number; col: string }> = [];
+
   // اسلحه‌ها
   private gun = new THREE.Group();
   private gunBodies: THREE.Group[] = [];
@@ -341,6 +408,12 @@ export class GameEngine {
   constructor(container: HTMLElement, hud: (s: Partial<HudState>) => void) {
     this.container = container;
     this.hud = hud;
+
+    try {
+      this.best = parseInt(localStorage.getItem("cwo-best") ?? "0", 10) || 0;
+    } catch {
+      this.best = 0;
+    }
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
@@ -1917,8 +1990,15 @@ export class GameEngine {
       s.alerted = true;
     }
     if (aliveAllies.length < 4 && n > 1) this.showBanner("نیروی کمکی رسید!", "info");
-    this.showBanner(`موج ${toFa(n)}`, "wave");
-    sfx.wave();
+    this.storm = n >= 4 && n % 4 === 0;
+    if (this.storm) {
+      this.showBanner(`موج ${toFa(n)} — طوفان شن!`, "streak");
+      sfx.wave();
+      setTimeout(() => sfx.wave(), 400);
+    } else {
+      this.showBanner(`موج ${toFa(n)}`, "wave");
+      sfx.wave();
+    }
     this.emitNow();
   }
 
@@ -1988,7 +2068,7 @@ export class GameEngine {
     if (e.bones) e.bones.recoil = 0.45;
     sfx.enemyShot(THREE.MathUtils.clamp(0.4 - dist * 0.01, 0.04, 0.38));
     if (!hits) return;
-    if (isPlayer) this.damagePlayer(ETYPES[e.etype].dmg(this.wave) * (0.75 + Math.random() * 0.5));
+    if (isPlayer) this.damagePlayer(ETYPES[e.etype].dmg(this.wave) * (0.75 + Math.random() * 0.5), e.root.position);
     else if (e.target && e.target !== "player") this.damageAlly(e.target, ETYPES[e.etype].dmg(this.wave));
   }
 
@@ -2089,7 +2169,7 @@ export class GameEngine {
               s.meleeCd = 0.9;
               s.flashT = 0.05;
               sfx.knife();
-              if (s.target === "player") this.damagePlayer(def.dmg(this.wave));
+              if (s.target === "player") this.damagePlayer(def.dmg(this.wave), s.root.position);
               else if (s.target) this.damageAlly(s.target, def.dmg(this.wave));
             }
           }
@@ -2327,7 +2407,9 @@ export class GameEngine {
       this.lastKillT = now;
       const bonus = (head ? 50 : 0) + Math.max(0, this.streak - 1) * 25 + this.wave * 10;
       this.score += def.score + bonus;
-      const label = head ? `هدشات! ${def.label} از پای درآمد` : `${def.label} از پای درآمد`;
+      const reward = 300 + (head ? 150 : 0);
+      this.money += reward;
+      const label = head ? `هدشات! ${def.label} از پای درآمد  +$${reward}` : `${def.label} از پای درآمد  +$${reward}`;
       this.pushFeed(label, head);
       if (this.streak === 2) this.showBanner("کشتار دوبل!", "streak");
       else if (this.streak === 3) this.showBanner("سه‌کشتار!", "streak");
@@ -2338,7 +2420,7 @@ export class GameEngine {
     this.emitNow();
   }
 
-  private damagePlayer(d: number) {
+  private damagePlayer(d: number, attacker?: THREE.Vector3) {
     if (this.state !== "play") return;
     let dmg = d;
     if (this.armor > 0) {
@@ -2349,10 +2431,27 @@ export class GameEngine {
     this.health = Math.max(0, this.health - dmg);
     this.dmgKey = Date.now();
     this.shake = Math.min(1, this.shake + 0.35);
+    if (attacker) {
+      const dx = attacker.x - this.pos.x;
+      const dz = attacker.z - this.pos.z;
+      const angToAttacker = Math.atan2(dx, dz);
+      let deg = THREE.MathUtils.radToDeg(angToAttacker - this.yaw);
+      deg = ((deg + 540) % 360) - 180;
+      this.dmgDirs.push({ id: this.dmgDirId++, deg });
+      if (this.dmgDirs.length > 6) this.dmgDirs.shift();
+    }
     sfx.hurt();
     if (this.health <= 0) {
       this.state = "over";
       this.stats = { kills: this.kills, headshots: this.headshots, wave: this.wave, score: this.score, time: this.time };
+      if (this.score > this.best) {
+        this.best = this.score;
+        try {
+          localStorage.setItem("cwo-best", String(this.best));
+        } catch {
+          /* ignore */
+        }
+      }
       sfx.gameOver();
       sfx.stopWind();
       if (document.pointerLockElement) document.exitPointerLock();
@@ -2396,6 +2495,11 @@ export class GameEngine {
   private currentSpread(): number {
     const w = WEAPONS[this.slot];
     if (w.melee) return 0;
+    if (w.scoped && this.scoping) {
+      // اسکوپ AWP — دقت بسیار بالا، اما حرکت آن را خراب می‌کند
+      const moveK = THREE.MathUtils.clamp(Math.hypot(this.vel.x, this.vel.z) / 2, 0, 1);
+      return 0.0004 + moveK * 0.01;
+    }
     const moveK = THREE.MathUtils.clamp(Math.hypot(this.vel.x, this.vel.z) / 6.4, 0, 1);
     return (w.spread + moveK * 0.005 + this.heat * 0.012) * (1 - this.adsK * 0.8);
   }
@@ -2403,10 +2507,17 @@ export class GameEngine {
   private updatePlayer(dt: number) {
     const f = (this.keys.has("KeyW") ? 1 : 0) - (this.keys.has("KeyS") ? 1 : 0);
     const st = (this.keys.has("KeyD") ? 1 : 0) - (this.keys.has("KeyA") ? 1 : 0);
-    const wantAds = this.adsDown && !WEAPONS[this.slot].melee;
+    const wNow = WEAPONS[this.slot];
+    const wantScope = this.adsDown && wNow.scoped === true;
+    if (wantScope !== this.scoping) {
+      this.scoping = wantScope;
+      this.emitNow();
+    }
+    this.scopeT += ((this.scoping ? 1 : 0) - this.scopeT) * Math.min(1, dt * 9);
+    const wantAds = this.adsDown && !wNow.melee && !wNow.scoped;
     this.adsK += ((wantAds ? 1 : 0) - this.adsK) * Math.min(1, dt * 11);
-    this.sprinting = (this.keys.has("ShiftLeft") || this.keys.has("ShiftRight")) && f > 0 && !wantAds;
-    const spd = (this.sprinting ? 9 : 4.6) * (1 - this.adsK * 0.42);
+    this.sprinting = (this.keys.has("ShiftLeft") || this.keys.has("ShiftRight")) && f > 0 && !wantAds && !this.scoping;
+    const spd = (this.sprinting ? 9 : 4.6) * (1 - this.adsK * 0.42) * (1 - this.scopeT * 0.62);
 
     const sinY = Math.sin(this.yaw);
     const cosY = Math.cos(this.yaw);
@@ -2448,8 +2559,9 @@ export class GameEngine {
     this.kick += this.kickV * dt;
     this.camera.rotation.set(this.pitch + this.kick * 0.05, this.yaw, st * -0.012 * moveK);
 
-    const targetFov = this.sprinting && moveK > 0.5 ? 82 : 74 - this.adsK * 20;
-    this.fov += (targetFov - this.fov) * Math.min(1, dt * 8);
+    let targetFov = this.sprinting && moveK > 0.5 ? 82 : 74 - this.adsK * 20;
+    if (this.scoping) targetFov = 26; // زوم اسکوپ AWP
+    this.fov += (targetFov - this.fov) * Math.min(1, dt * (this.scoping ? 12 : 8));
     if (Math.abs(this.camera.fov - this.fov) > 0.05) {
       this.camera.fov = this.fov;
       this.camera.updateProjectionMatrix();
@@ -2545,22 +2657,114 @@ export class GameEngine {
     this.reloading = false;
     this.fireCd = 0.25;
     this.knifeT = -1;
+    this.scoping = false;
     for (let i = 0; i < 3; i++) this.gunBodies[i].visible = i === slot;
     sfx.swap();
+    this.emitNow();
+  }
+
+  /** تعویض سلاح اصلی بین مالک‌شده‌ها (کلید Q) */
+  private cyclePrimary(dir = 1) {
+    const owned = (["ak", "mp5", "shotgun", "awp"] as PrimaryId[]).filter((p) => this.ownedPrimaries.has(p));
+    if (owned.length < 2) return;
+    const idx = owned.indexOf(this.primaryId);
+    const next = owned[(idx + dir + owned.length) % owned.length];
+    this.setPrimary(next);
+  }
+
+  private setPrimary(id: PrimaryId) {
+    if (!this.ownedPrimaries.has(id) || !this.primaryBodies || !this.primaryMuzzles) return;
+    // ذخیره مهمات قبلی
+    this.primaryAmmo[this.primaryId] = { mag: this.ammoArr[0], reserve: this.reserveArr[0] };
+    this.primaryId = id;
+    WEAPONS[0] = PRIMARY_DEFS[id];
+    for (const p of ["ak", "mp5", "shotgun", "awp"] as PrimaryId[]) this.primaryBodies[p].visible = p === id;
+    this.muzzles[0] = this.primaryMuzzles[id];
+    this.ammoArr[0] = this.primaryAmmo[id].mag;
+    this.reserveArr[0] = this.primaryAmmo[id].reserve;
+    this.reloading = false;
+    this.scoping = false;
+    this.fireCd = 0.3;
+    if (this.slot !== 0) this.switchWeapon(0);
+    sfx.swap();
+    this.emitNow();
+  }
+
+  /* ---------- اقتصاد و فروشگاه ---------- */
+
+  openBuy() {
+    if (this.state !== "play" || this.buyOpen) return;
+    this.buyOpen = true;
+    this.scoping = false;
+    if (document.pointerLockElement) document.exitPointerLock();
+    this.emitNow();
+  }
+
+  closeBuy() {
+    if (!this.buyOpen) return;
+    this.buyOpen = false;
+    this.requestLock();
+    this.emitNow();
+  }
+
+  purchase(id: string) {
+    const item = BUY_ITEMS.find((b) => b.id === id);
+    if (!item || this.money < item.price || this.state !== "play") return;
+    if (item.kind === "primary" && item.primary) {
+      if (this.ownedPrimaries.has(item.primary)) return;
+      this.money -= item.price;
+      this.ownedPrimaries.add(item.primary);
+      this.primaryAmmo[item.primary] = { mag: PRIMARY_DEFS[item.primary].mag, reserve: PRIMARY_DEFS[item.primary].mag * 3 };
+      this.setPrimary(item.primary);
+      sfx.pickup();
+    } else if (item.id === "vest") {
+      if (this.armor >= 100) return;
+      this.money -= item.price;
+      this.armor = 100;
+      sfx.pickup();
+    } else if (item.id === "ammo") {
+      this.money -= item.price;
+      for (const p of this.ownedPrimaries) {
+        this.primaryAmmo[p].reserve += PRIMARY_DEFS[p].mag * 3;
+      }
+      this.reserveArr[0] = this.primaryAmmo[this.primaryId].reserve;
+      this.reserveArr[1] = Infinity;
+      sfx.pickup();
+    } else if (item.id === "he") {
+      if (this.grenades >= 5) return;
+      this.money -= item.price;
+      this.grenades = Math.min(5, this.grenades + 1);
+      sfx.pickup();
+    }
     this.emitNow();
   }
 
   private shoot() {
     const w = WEAPONS[this.slot];
     this.ammoArr[this.slot]--;
-    this.fireCd = w.rof;
+    this.fireCd = w.rof * (this.scoping ? 1 : 1);
     this.heat = Math.min(1, this.heat + w.heatAdd);
-    this.kickV += w.kick;
-    this.pushZ = 0.075;
+    this.kickV += w.kick * (this.scoping ? 1.6 : 1);
+    this.pushZ = this.scoping ? 0.14 : 0.075;
     this.flashT = 0.05;
-    sfx.shot(this.slot === 0 ? "ak" : "pistol");
-    this.hitscan(w);
+    if (this.slot === 0 && !w.melee) this.ejectShell();
+    sfx.shot(this.slot === 0 ? (w.scoped ? "ak" : "ak") : "pistol");
+    const pellets = w.pellets ?? 1;
+    for (let i = 0; i < pellets; i++) this.hitscan(w);
     if (this.ammoArr[this.slot] <= 6) this.emitNow();
+  }
+
+  /** پوکه‌ی گلوله */
+  private ejectShell() {
+    if (this.shells.length > 40) return;
+    const m = new THREE.Mesh(this.shellGeo, this.shellMat);
+    const wp = new THREE.Vector3();
+    this.muzzles[this.slot].getWorldPosition(wp);
+    m.position.copy(wp);
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+    const vel = right.multiplyScalar(1.6 + Math.random()).add(new THREE.Vector3(0, 2.2 + Math.random(), 0));
+    this.scene.add(m);
+    this.shells.push({ m, vel, spin: new THREE.Vector3(Math.random() * 10, Math.random() * 10, Math.random() * 10), life: 1.4 });
   }
 
   private hitscan(w: WeaponDef) {
@@ -2609,6 +2813,7 @@ export class GameEngine {
         sfx.hit(head);
         this.spawnBurst(h.point, head ? 0xd81f1f : 0xa31414, 7);
         this.addTracer(muzzleWorld, h.point, 0xffe0a8);
+        this.spawnDmgNum(h.point, Math.round(dmg), head);
         if (e.hp <= 0) this.killEnemy(e, head);
         return;
       }
@@ -2715,10 +2920,19 @@ export class GameEngine {
     const dark = new THREE.MeshStandardMaterial({ color: 0x23262a, roughness: 0.5, metalness: 0.5 });
     const wood = new THREE.MeshStandardMaterial({ color: 0x5a3b22, roughness: 0.8 });
 
-    // کلاشینکف
+    const olive = new THREE.MeshStandardMaterial({ color: 0x4a5238, roughness: 0.75 });
+    const black = new THREE.MeshStandardMaterial({ color: 0x1a1c1e, roughness: 0.5, metalness: 0.5 });
+    const green = new THREE.MeshStandardMaterial({ color: 0x2e4a30, roughness: 0.6, metalness: 0.3 });
+    const mkMuzzle = (parent: THREE.Group, z: number, y = 0.012) => {
+      const m = new THREE.Object3D();
+      m.position.set(0, y, z);
+      parent.add(m);
+      return m;
+    };
+
+    // کلاشینکف AK-47
     const ak = new THREE.Group();
-    const akBody = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.1, 0.5), dark);
-    ak.add(akBody);
+    ak.add(new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.1, 0.5), dark));
     const akBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.017, 0.017, 0.46, 10), dark);
     akBarrel.rotation.x = Math.PI / 2;
     akBarrel.position.set(0, 0.012, -0.46);
@@ -2733,9 +2947,86 @@ export class GameEngine {
     const akStock = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.09, 0.22), wood);
     akStock.position.set(0, -0.01, 0.33);
     ak.add(akStock);
-    const akMuzzle = new THREE.Object3D();
-    akMuzzle.position.set(0, 0.012, -0.7);
-    ak.add(akMuzzle);
+    const akMuzzle = mkMuzzle(ak, -0.7);
+
+    // مسلسل MP5
+    const mp5 = new THREE.Group();
+    mp5.add(new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.09, 0.42), black));
+    const mp5Barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.3, 8), black);
+    mp5Barrel.rotation.x = Math.PI / 2;
+    mp5Barrel.position.set(0, 0.01, -0.36);
+    mp5.add(mp5Barrel);
+    const mp5Hand = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.18), black);
+    mp5Hand.position.set(0, -0.01, -0.24);
+    mp5.add(mp5Hand);
+    const mp5Mag = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.2, 0.07), black);
+    mp5Mag.position.set(0, -0.14, -0.02);
+    mp5Mag.rotation.x = 0.15;
+    mp5.add(mp5Mag);
+    const mp5Stock = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.07, 0.2), black);
+    mp5Stock.position.set(0, -0.01, 0.3);
+    mp5.add(mp5Stock);
+    const mp5Sight = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.05, 6), black);
+    mp5Sight.position.set(0, 0.07, -0.1);
+    mp5.add(mp5Sight);
+    const mp5Muzzle = mkMuzzle(mp5, -0.55, 0.01);
+
+    // شاتگان M3
+    const shotgun = new THREE.Group();
+    shotgun.add(new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.55), black));
+    const sgBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.024, 0.55, 10), black);
+    sgBarrel.rotation.x = Math.PI / 2;
+    sgBarrel.position.set(0, 0.015, -0.5);
+    shotgun.add(sgBarrel);
+    const sgTube = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.45, 8), dark);
+    sgTube.rotation.x = Math.PI / 2;
+    sgTube.position.set(0, -0.025, -0.42);
+    shotgun.add(sgTube);
+    const sgPump = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.16), wood);
+    sgPump.position.set(0, -0.025, -0.3);
+    shotgun.add(sgPump);
+    const sgStock = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.1, 0.26), wood);
+    sgStock.position.set(0, -0.02, 0.38);
+    shotgun.add(sgStock);
+    const sgMuzzle = mkMuzzle(shotgun, -0.8, 0.015);
+
+    // اسنایپر AWP
+    const awp = new THREE.Group();
+    awp.add(new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.11, 0.62), green));
+    const awpBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.6, 10), black);
+    awpBarrel.rotation.x = Math.PI / 2;
+    awpBarrel.position.set(0, 0.015, -0.58);
+    awp.add(awpBarrel);
+    const awpScope = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.2, 10), black);
+    awpScope.rotation.x = Math.PI / 2;
+    awpScope.position.set(0, 0.1, -0.1);
+    awp.add(awpScope);
+    const awpScopeLens = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, 0.01, 10), new THREE.MeshStandardMaterial({ color: 0x2a4a6a, roughness: 0.1, metalness: 0.8 }));
+    awpScopeLens.rotation.x = Math.PI / 2;
+    awpScopeLens.position.set(0, 0.1, -0.2);
+    awp.add(awpScopeLens);
+    const awpMag = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.14, 0.08), green);
+    awpMag.position.set(0, -0.11, -0.05);
+    awp.add(awpMag);
+    const awpStock = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.12, 0.3), green);
+    awpStock.position.set(0, -0.02, 0.42);
+    awp.add(awpStock);
+    const awpBipod1 = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.12, 5), black);
+    awpBipod1.position.set(-0.03, -0.1, -0.4);
+    awpBipod1.rotation.z = 0.3;
+    awp.add(awpBipod1);
+    const awpBipod2 = awpBipod1.clone();
+    awpBipod2.position.x = 0.03;
+    awpBipod2.rotation.z = -0.3;
+    awp.add(awpBipod2);
+    const awpMuzzle = mkMuzzle(awp, -0.92, 0.015);
+
+    this.primaryBodies = { ak, mp5, shotgun, awp };
+    this.primaryMuzzles = { ak: akMuzzle, mp5: mp5Muzzle, shotgun: sgMuzzle, awp: awpMuzzle };
+    for (const id of ["ak", "mp5", "shotgun", "awp"] as PrimaryId[]) {
+      this.primaryBodies[id].visible = id === "ak";
+      this.primaryGroup.add(this.primaryBodies[id]);
+    }
 
     // کلت
     const pistol = new THREE.Group();
@@ -2765,11 +3056,11 @@ export class GameEngine {
     knifeTip.position.set(0, 0.02, -0.36);
     knife.add(knifeTip);
 
-    this.gunBodies = [ak, pistol, knife];
-    this.muzzles = [akMuzzle, pMuzzle, knifeTip];
+    this.gunBodies = [this.primaryGroup, pistol, knife];
+    this.muzzles = [this.primaryMuzzles.ak, pMuzzle, knifeTip];
     pistol.visible = false;
     knife.visible = false;
-    this.gun.add(ak, pistol, knife);
+    this.gun.add(this.primaryGroup, pistol, knife);
 
     this.flash = new THREE.Sprite(
       new THREE.SpriteMaterial({ map: this.flashTex, color: 0xffd9a0, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false })
@@ -2788,6 +3079,8 @@ export class GameEngine {
     this.pushZ *= Math.exp(-11 * dt);
     const moveK = THREE.MathUtils.clamp(Math.hypot(this.vel.x, this.vel.z) / 9, 0, 1);
     const w = WEAPONS[this.slot];
+    // هنگام اسکوپ، مدل اسلحه پنهان می‌شود (از لنز نگاه می‌کنیم)
+    this.gun.visible = this.scopeT < 0.55;
     const bobAmp = 1 - this.adsK * 0.85;
     const baseX = w.melee ? 0.34 : 0.24 * (1 - this.adsK);
     const baseY = w.melee ? -0.28 : -0.22 + 0.055 * this.adsK;
@@ -2862,7 +3155,67 @@ export class GameEngine {
     }
   }
 
+  /** عدد آسیب شناور */
+  private spawnDmgNum(at: THREE.Vector3, val: number, head: boolean) {
+    if (this.dmgNums.length > 20) return;
+    const c = document.createElement("canvas");
+    c.width = 128;
+    c.height = 64;
+    const g = c.getContext("2d");
+    if (!g) return;
+    g.font = "900 44px 'Black Ops One', monospace";
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.lineWidth = 8;
+    g.strokeStyle = "rgba(0,0,0,0.85)";
+    const txt = String(val);
+    g.strokeText(txt, 64, 32);
+    g.fillStyle = head ? "#ffb03a" : "#ffffff";
+    g.fillText(txt, 64, 32);
+    const tex = new THREE.CanvasTexture(c);
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+    sp.position.copy(at).add(new THREE.Vector3((Math.random() - 0.5) * 0.4, 0.3, 0));
+    sp.scale.set(head ? 0.8 : 0.6, head ? 0.4 : 0.3, 1);
+    this.scene.add(sp);
+    this.dmgNums.push({ s: sp, life: 0.8, vy: 1.4 });
+  }
+
   private updateFx(dt: number) {
+    // اعداد آسیب
+    for (let i = this.dmgNums.length - 1; i >= 0; i--) {
+      const d = this.dmgNums[i];
+      d.life -= dt;
+      d.s.position.y += d.vy * dt;
+      (d.s.material as THREE.SpriteMaterial).opacity = Math.max(0, d.life / 0.8);
+      if (d.life <= 0) {
+        this.scene.remove(d.s);
+        (d.s.material as THREE.SpriteMaterial).map?.dispose();
+        (d.s.material as THREE.Material).dispose();
+        this.dmgNums.splice(i, 1);
+      }
+    }
+    // پوکه‌ها
+    for (let i = this.shells.length - 1; i >= 0; i--) {
+      const sh = this.shells[i];
+      sh.life -= dt;
+      sh.vel.y -= 9 * dt;
+      sh.m.position.addScaledVector(sh.vel, dt);
+      sh.m.rotation.x += sh.spin.x * dt;
+      sh.m.rotation.y += sh.spin.y * dt;
+      if (sh.m.position.y < 0.02) {
+        sh.m.position.y = 0.02;
+        sh.vel.set(sh.vel.x * 0.3, Math.abs(sh.vel.y) * 0.25, sh.vel.z * 0.3);
+      }
+      if (sh.life <= 0) {
+        this.scene.remove(sh.m);
+        this.shells.splice(i, 1);
+      }
+    }
+    // پینگ‌های رادار
+    for (let i = this.radarPings.length - 1; i >= 0; i--) {
+      this.radarPings[i].life -= dt;
+      if (this.radarPings[i].life <= 0) this.radarPings.splice(i, 1);
+    }
     for (let i = this.tracers.length - 1; i >= 0; i--) {
       const t = this.tracers[i];
       t.life -= dt * 5.5;
@@ -2889,7 +3242,22 @@ export class GameEngine {
     }
     this.dustT += dt;
     this.dust.position.set(this.pos.x, 0, this.pos.z);
-    this.dust.rotation.y = this.dustT * 0.02;
+    this.dust.rotation.y = this.dustT * (0.02 + this.stormK * 0.5);
+  }
+
+  /** طوفان شن — مه غلیظ، گردوغبار شدید، دید کم */
+  private updateStorm(dt: number) {
+    this.stormK += ((this.storm ? 1 : 0) - this.stormK) * Math.min(1, dt * 0.8);
+    const fog = this.scene.fog as THREE.Fog;
+    if (fog) {
+      fog.near = 70 - this.stormK * 55;
+      fog.far = 330 - this.stormK * 230;
+      fog.color.setHex(0xd8c69c).lerp(new THREE.Color(0xb89a66), this.stormK * 0.7);
+    }
+    (this.scene.background as THREE.Color).setHex(0xd8c69c).lerp(new THREE.Color(0xc0a272), this.stormK * 0.7);
+    const dm = this.dust.material as THREE.PointsMaterial;
+    dm.opacity = 0.38 + this.stormK * 0.5;
+    dm.size = 0.12 + this.stormK * 0.16;
   }
 
   /* ================= مینی‌مپ و قطب‌نما ================= */
@@ -3068,9 +3436,20 @@ export class GameEngine {
 
     on(document, "keydown", ((e: KeyboardEvent) => {
       this.keys.add(e.code);
+      if (e.code === "KeyB") {
+        if (this.buyOpen) this.closeBuy();
+        else this.openBuy();
+        return;
+      }
+      if (e.code === "Escape" && this.buyOpen) {
+        this.closeBuy();
+        return;
+      }
+      if (this.buyOpen) return;
       if (e.code === "Digit1") this.switchWeapon(0);
       if (e.code === "Digit2") this.switchWeapon(1);
       if (e.code === "Digit3") this.switchWeapon(2);
+      if (e.code === "KeyQ") this.cyclePrimary(1);
       if (e.code === "KeyP") {
         if (this.state === "play") this.pause();
         else if (this.state === "paused") this.resume();
@@ -3105,7 +3484,7 @@ export class GameEngine {
         this.adsDown = true;
         return;
       }
-      if (e.button !== 0) return;
+      if (e.button !== 0 || this.buyOpen) return;
       const locked = document.pointerLockElement === this.renderer.domElement;
       this.mouseDown = true;
       this.mousePressed = true;
@@ -3130,7 +3509,7 @@ export class GameEngine {
 
     on(document, "pointerlockchange", (() => {
       const locked = document.pointerLockElement === this.renderer.domElement;
-      if (!locked && this.state === "play") {
+      if (!locked && this.state === "play" && !this.buyOpen) {
         this.state = "paused";
         this.mouseDown = false;
         this.keys.clear();
@@ -3285,6 +3664,14 @@ export class GameEngine {
       bannerText: this.bannerText,
       bannerKind: this.bannerKind,
       stats: this.stats,
+      money: this.money,
+      buyOpen: this.buyOpen,
+      scoping: this.scoping,
+      best: this.best,
+      ownedPrimaries: [...this.ownedPrimaries],
+      primaryId: this.primaryId,
+      dmgDirs: [...this.dmgDirs],
+      storm: this.storm,
     });
   }
 
@@ -3309,6 +3696,7 @@ export class GameEngine {
       this.updateSoldiers(dt, "combat");
       this.updateWeaponView(dt);
       this.updateGrenades(dt);
+      this.updateStorm(dt);
       this.updateCompass();
       this.updateMinimap();
 
