@@ -76,6 +76,9 @@ const initialHud: HudState = {
   state: "menu",
   modelSource: "loading",
   propsSource: "loading",
+  assetsLoaded: 0,
+  assetsTotal: 16,
+  locked: false,
   health: 100,
   armor: 25,
   ammo: 30,
@@ -144,6 +147,21 @@ export default function App() {
       {/* لایه‌های جو */}
       <div className="absolute inset-0 pointer-events-none vignette" />
       <div className="absolute inset-0 pointer-events-none grain" />
+
+      {/* هشدار قفل ماوس */}
+      {hud.state === "play" && !hud.locked && (
+        <div className="absolute left-1/2 top-[18%] -translate-x-1/2 z-20 flex flex-col items-center gap-2">
+          <button
+            className="btn-mil px-8 py-3 text-base pointer-events-auto anim-blink"
+            onClick={() => eng()?.lockPointer()}
+          >
+            کلیک کن تا ماوس قفل شود
+          </button>
+          <span className="text-[11px] text-[#d8c49a]/75 bg-black/50 px-3 py-1 clip-tag">
+            یا نگه‌دار و بکش تا نشانه بگیری — P برای توقف
+          </span>
+        </div>
+      )}
 
       {/* مینی‌مپ و قطب‌نما — همیشه زنده (موتور مستقیم می‌کشد) */}
       <div className="absolute inset-x-0 top-3 flex justify-center pointer-events-none">
@@ -372,17 +390,27 @@ export default function App() {
               نقشه‌ای وسیع با میدان بازار، محله‌ی مسکونی، محوطه‌ی کانتینرها، نخلستان و صخره‌زار.
               چهار هم‌رزم کنار تو می‌جنگند؛ موج‌ها را پس بزن، هدشات بزن و رکورد بزن.
             </p>
-            <div className="anim-rise flex flex-wrap gap-2 mt-4 max-w-md" style={{ animationDelay: "0.3s" }}>
+            <div className="anim-rise flex flex-wrap gap-2 mt-4 max-w-lg" style={{ animationDelay: "0.3s" }}>
               {[
                 hud.modelSource === "glb" ? "سرباز Mixamo ✔" : hud.modelSource === "loading" ? "بارگیری سرباز…" : "سرباز رویه‌ساز",
-                hud.propsSource === "polyhaven" ? "اشیای Poly Haven (CC0) ✔" : hud.propsSource === "loading" ? "بارگیری اشیای CC0…" : "اشیای رویه‌ساز",
+                hud.propsSource === "polyhaven"
+                  ? `مدل‌های متن‌باز: ${hud.assetsLoaded}/${hud.assetsTotal} ✔`
+                  : hud.propsSource === "loading"
+                    ? `بارگیری مدل‌ها… ${hud.assetsLoaded}/${hud.assetsTotal}`
+                    : "مدل‌های رویه‌ساز (آفلاین)",
                 "نقشه ۳۸۰×۳۸۰ متر",
                 "۴ هم‌رزم هوش مصنوعی",
+                "سلاح‌های دانلودی",
               ].map((t) => (
                 <span key={t} className="clip-tag bg-black/45 border border-[#ffb03a]/25 px-3 py-1 text-[11px] font-bold text-[#d8c49a]/90">
                   {t}
                 </span>
               ))}
+            </div>
+            <div className="anim-rise mt-3 max-w-lg text-[10px] leading-5 text-[#d8c49a]/45" style={{ animationDelay: "0.35s" }}>
+              منابع متن‌باز: Poly Haven (لایسنس CC0 — مالکیت عمومی) • poly.pizza (CC-BY) • three.js examples
+              <br />
+              همه‌ی دارایی‌ها در زمان اجرا از API رسمی سرویس‌ها فهرست‌گیری و دانلود می‌شوند.
             </div>
           </div>
 
@@ -399,7 +427,7 @@ export default function App() {
                 ["G", "پرتاب نارنجک"],
                 ["1 / 2 / 3", "تعویض سلاح"],
                 ["WHEEL", "تعویض سریع سلاح"],
-                ["ESC", "توقف عملیات"],
+                ["ESC / P", "توقف عملیات"],
               ].map(([k, v]) => (
                 <div key={k} className="flex items-center justify-between py-1.5 border-b border-white/5 last:border-0">
                   <span className="text-xs text-[#d8c49a]/80 font-medium">{v}</span>

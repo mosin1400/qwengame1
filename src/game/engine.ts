@@ -1,7 +1,8 @@
 import * as THREE from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { GLTFLoader, type GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { sfx } from "./audio";
 import { createProceduralSoldier, animateProcedural, type ProcRig } from "./proceduralSoldier";
+import { AssetBank, SLOT_DEFS, type SlotName } from "./assets";
 
 /* ============================================================
    کانتر وب — موتور بازی (نسخه‌ی نقشه‌ی بزرگ)
@@ -38,6 +39,9 @@ export interface HudState {
   state: GameState;
   modelSource: "glb" | "procedural" | "loading";
   propsSource: "polyhaven" | "procedural" | "loading";
+  assetsLoaded: number;
+  assetsTotal: number;
+  locked: boolean;
   health: number;
   armor: number;
   ammo: number;
@@ -142,12 +146,7 @@ const SOLDIER_URLS = [
   "https://raw.githubusercontent.com/mrdoob/three.js/r160/examples/models/gltf/Soldier.glb",
 ];
 
-const PH_FILES = (id: string) => `https://api.polyhaven.com/files/${id}`;
-const PROP_SLUGS = ["wine-barrel-01", "wooden-pallet", "barrel-01", "traffic-cone-01", "fire-hydrant-01", "wooden-crate-01"];
-const SAND_URLS = [
-  "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sand_01/sand_01_diff_2k.jpg",
-  "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/sand_01/sand_01_diff_1k.jpg",
-];
+
 
 const ALLY_NAMES = ["علی", "رضا", "مهدی", "حسن"];
 const ALLY_TINT = 0xa8e8b0;
@@ -208,8 +207,18 @@ export class GameEngine {
   private modelSource: HudState["modelSource"] = "loading";
   private propsSource: HudState["propsSource"] = "loading";
   private soldierBuffer: ArrayBuffer | null = null;
-  private soldierClips: { idle: THREE.AnimationClip; walk: THREE.AnimationClip; run: THREE.AnimationClip } | null = null;
-  private propTemplates: THREE.Object3D[] = [];
+  private bank = new AssetBank();
+  private placements = new Map<
+    SlotName,
+    Array<{ group: THREE.Group; targetH: number; fallback: THREE.Object3D; upgraded: boolean }>
+  >();
+  private assetsLoaded = 0;
+  private assetsTotal = Object.keys(SLOT_DEFS).length;
+  private soldierPool: GLTF[] = [];
+  private poolBusy = false;
+  private dragLook = false;
+  private lastMX = 0;
+  private lastMY = 0;
 
   // بازیکن
   private pos = new THREE.Vector3(0, 0, 28);
@@ -319,8 +328,19 @@ export class GameEngine {
     this.spawnMenuActors();
     this.drawMapBase();
     void this.loadSoldier();
-    void this.loadProps();
     void this.loadGroundTexture();
+    this.bank.onSlot((slot, tpl) => this.upgradeSlot(slot, tpl));
+    this.bank.onStatus = (l, t) => {
+      this.assetsLoaded = l;
+      this.assetsTotal = t;
+      if (l > 0) this.propsSource = "polyhaven";
+      if (!this.disposed) this.emitNow();
+    };
+    void this.bank.loadAll().then(() => {
+      if (this.disposed) return;
+      if (this.bank.loaded === 0) this.propsSource = "procedural";
+      this.emitNow();
+    });
 
     this.clock.start();
     this.loop();
@@ -368,6 +388,14 @@ export class GameEngine {
   private addBox(mesh: THREE.Mesh, x: number, z: number, w: number, d: number) {
     this.boxCols.push({ x, z, hw: w / 2, hd: d / 2 });
     this.blockers.push(mesh);
+  }
+
+  /** مانع نامرئی برای تست خط دید (مدل ظاهری جداست) */
+  private addInvisibleBlocker(x: number, z: number, w: number, h: number, d: number) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial({ visible: false }));
+    m.position.set(x, h / 2, z);
+    this.scene.add(m);
+    this.blockers.push(m);
   }
 
   private buildWorld() {
@@ -433,6 +461,7 @@ export class GameEngine {
     this.buildResidential();
     this.buildOasis();
     this.buildRocks();
+    this.scatterFlavor();
     this.buildMountains();
     this.buildDust();
   }
@@ -440,7 +469,14 @@ export class GameEngine {
   private groundMat!: THREE.MeshStandardMaterial;
 
   private async loadGroundTexture() {
-    for (const url of SAND_URLS) {
+    const urls: string[] = [];
+    const ph = await AssetBank.polyHavenTextureUrl("sand_01");
+    if (ph) urls.push(ph);
+    urls.push(
+      "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/sand_01/sand_01_diff_2k.jpg",
+      "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/sand_01/sand_01_diff_1k.jpg"
+    );
+    for (const url of urls) {
       try {
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), 9000);
@@ -457,7 +493,10 @@ export class GameEngine {
         tex.colorSpace = THREE.SRGBColorSpace;
         tex.anisotropy = 4;
         tex.needsUpdate = true;
-        if (!this.disposed) this.groundMat.map = tex;
+        if (!this.disposed) {
+          this.groundMat.map = tex;
+          this.groundMat.needsUpdate = true;
+        }
         return;
       } catch {
         /* بعدی */
@@ -465,108 +504,313 @@ export class GameEngine {
     }
   }
 
-  /* --- اشیای Poly Haven (CC0) --- */
+  /* --- سیستم جای‌گذاری مدل‌های دانلودی (Poly Haven CC0 / poly.pizza CC-BY) --- */
 
-  private async loadProps() {
-    const loader = new GLTFLoader();
-    const results = await Promise.allSettled(
-      PROP_SLUGS.map(async (slug) => {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), 8000);
-        const res = await fetch(PH_FILES(slug), { signal: ctrl.signal });
-        clearTimeout(t);
-        if (!res.ok) throw new Error("nf");
-        const json = (await res.json()) as Record<string, { gltf?: { url?: string } }>;
-        const url = json["1k"]?.gltf?.url ?? json["2k"]?.gltf?.url;
-        if (!url) throw new Error("nf");
-        const gltf = await loader.loadAsync(url);
-        return gltf.scene as THREE.Object3D;
-      })
-    );
-    for (const r of results) if (r.status === "fulfilled") this.propTemplates.push(r.value);
+  private place(
+    slot: SlotName,
+    makeFallback: () => THREE.Object3D,
+    x: number,
+    z: number,
+    ry = 0,
+    targetH = SLOT_DEFS[slot].h ?? 1
+  ): THREE.Group {
+    const group = new THREE.Group();
+    group.position.set(x, 0, z);
+    group.rotation.y = ry;
+    const fallback = makeFallback();
+    group.add(fallback);
+    this.scene.add(group);
+    let list = this.placements.get(slot);
+    if (!list) {
+      list = [];
+      this.placements.set(slot, list);
+    }
+    const rec = { group, targetH, fallback, upgraded: false };
+    list.push(rec);
+    const tpl = this.bank.get(slot);
+    if (tpl) this.applyModel(rec, tpl);
+    return group;
+  }
+
+  private applyModel(rec: { group: THREE.Group; targetH: number; fallback: THREE.Object3D; upgraded: boolean }, tpl: THREE.Object3D) {
+    if (rec.upgraded || this.disposed) return;
+    rec.group.remove(rec.fallback);
+    const clone = tpl.clone();
+    const box = new THREE.Box3().setFromObject(clone);
+    const size = box.getSize(new THREE.Vector3());
+    if (size.y > 0.001) {
+      const s = rec.targetH / size.y;
+      clone.scale.multiplyScalar(s);
+      clone.position.y -= box.min.y * s;
+    }
+    rec.group.add(clone);
+    rec.upgraded = true;
+  }
+
+  private upgradeSlot(slot: SlotName, tpl: THREE.Object3D) {
     if (this.disposed) return;
-    this.propsSource = this.propTemplates.length > 0 ? "polyhaven" : "procedural";
-    this.scatterProps();
+    const list = this.placements.get(slot);
+    if (list) for (const rec of list) this.applyModel(rec, tpl);
+    if (slot === "wpn-ak") this.applyWeaponModel(0, tpl);
+    if (slot === "wpn-pistol") this.applyWeaponModel(1, tpl);
+    if (slot === "wpn-knife") this.applyWeaponModel(2, tpl);
+    this.propsSource = "polyhaven";
     this.drawMapBase();
     this.emitNow();
   }
 
-  private propFlavorSpots(): Array<[number, number]> {
-    const spots: Array<[number, number]> = [];
-    for (let i = 0; i < 10; i++) spots.push([(Math.random() - 0.5) * 80, (Math.random() - 0.5) * 80]);
-    for (let i = 0; i < 7; i++) spots.push([70 + Math.random() * 90, -160 + Math.random() * 90]);
-    for (let i = 0; i < 7; i++) spots.push([-160 + Math.random() * 90, 70 + Math.random() * 90]);
-    for (let i = 0; i < 6; i++) {
-      const a = Math.random() * Math.PI * 2;
-      spots.push([Math.cos(a) * (Math.random() * 60 + 60), Math.sin(a) * (Math.random() * 60 + 60)]);
+  private applyWeaponModel(idx: number, tpl: THREE.Object3D) {
+    const body = this.gunBodies[idx];
+    if (!body || body.userData.modelUpgraded) return;
+    body.userData.modelUpgraded = true;
+    for (let i = body.children.length - 1; i >= 0; i--) {
+      const c = body.children[i];
+      if (c !== this.muzzles[idx]) body.remove(c);
     }
-    return spots;
+    const clone = tpl.clone();
+    body.add(clone);
+    const mData = (tpl.userData as { muzzle?: THREE.Vector3 }).muzzle;
+    if (mData) this.muzzles[idx].position.copy(mData);
   }
 
-  private scatterProps() {
-    const spots = this.propFlavorSpots();
-    let ti = 0;
-    for (const [x, z] of spots) {
-      if (this.pointBlocked(x, z, 1.2)) continue;
-      let obj: THREE.Object3D;
-      let r = 0.6;
-      if (this.propTemplates.length > 0) {
-        const tpl = this.propTemplates[ti % this.propTemplates.length];
-        ti++;
-        obj = tpl.clone();
-        const box = new THREE.Box3().setFromObject(obj);
-        const size = new THREE.Vector3();
-        box.getSize(size);
-        const h = Math.max(0.2, size.y);
-        const s = THREE.MathUtils.clamp(1.1 / h, 0.4, 2.6) * (0.8 + Math.random() * 0.5);
-        obj.scale.setScalar(s);
-        obj.position.set(x, -box.min.y * s, z);
-        r = Math.max(size.x, size.z) * 0.5 * s + 0.1;
-        obj.traverse((o) => {
-          const m = o as THREE.Mesh;
-          if (m.isMesh) m.castShadow = true;
-        });
-      } else {
-        obj = this.makeFallbackProp(ti++);
-        obj.position.set(x, 0, z);
-        r = 0.65;
-      }
-      obj.rotation.y = Math.random() * Math.PI * 2;
-      this.scene.add(obj);
-      this.cirCols.push({ x, z, r });
+  /* --- سازنده‌های جایگزین (آفلاین) --- */
+
+  private makeFallbackStall(i: number): THREE.Group {
+    const canopyCols = [0xa83232, 0x3a6a8a, 0xc9a23a, 0x4a7a4a];
+    const stall = new THREE.Group();
+    const base = new THREE.Mesh(new THREE.BoxGeometry(3.6, 1.1, 1.8), new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.95 }));
+    base.position.y = 0.55;
+    base.castShadow = true;
+    base.receiveShadow = true;
+    stall.add(base);
+    const canopy = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.12, 2.6), new THREE.MeshStandardMaterial({ color: canopyCols[i % canopyCols.length], roughness: 0.9 }));
+    canopy.position.set(0, 2.35, 0);
+    canopy.rotation.x = 0.18;
+    canopy.castShadow = true;
+    stall.add(canopy);
+    for (const px of [-1.9, 1.9]) {
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 2.35, 6), new THREE.MeshStandardMaterial({ color: 0x4a3a22, roughness: 0.9 }));
+      pole.position.set(px, 1.17, 1.1);
+      stall.add(pole);
     }
+    return stall;
   }
 
-  private makeFallbackProp(seed: number): THREE.Object3D {
+  private makeFallbackContainer(color: number): THREE.Mesh {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(6.4, 2.6, 2.5), new THREE.MeshStandardMaterial({ color, roughness: 0.8, metalness: 0.25 }));
+    m.position.y = 1.3;
+    m.castShadow = true;
+    m.receiveShadow = true;
+    return m;
+  }
+
+  private makeFallbackHouse(color: number): THREE.Group {
     const g = new THREE.Group();
-    const kind = seed % 3;
-    if (kind === 0) {
-      const m = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.42, 0.46, 1, 12),
-        new THREE.MeshStandardMaterial({ color: 0x6a4632, roughness: 0.75, metalness: 0.2 })
-      );
-      m.position.y = 0.5;
-      m.castShadow = true;
-      g.add(m);
-    } else if (kind === 1) {
-      const m = new THREE.Mesh(
-        new THREE.BoxGeometry(1.5, 0.14, 1.5),
-        new THREE.MeshStandardMaterial({ color: 0x8a6b3f, roughness: 0.95 })
-      );
-      m.position.y = 0.07;
-      m.castShadow = true;
-      g.add(m);
-    } else {
-      const m = new THREE.Mesh(
-        new THREE.ConeGeometry(0.3, 0.75, 10),
-        new THREE.MeshStandardMaterial({ color: 0xd06a2a, roughness: 0.8 })
-      );
-      m.position.y = 0.37;
-      m.castShadow = true;
-      g.add(m);
+    const w = 14;
+    const d = 11;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(w, 5, d), new THREE.MeshStandardMaterial({ color, roughness: 0.95 }));
+    body.position.y = 2.5;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 1, 0.5, d + 1), new THREE.MeshStandardMaterial({ color: 0x6e5a40, roughness: 1 }));
+    roof.position.y = 5.25;
+    roof.castShadow = true;
+    g.add(roof);
+    const door = new THREE.Mesh(new THREE.BoxGeometry(1.6, 2.6, 0.3), new THREE.MeshStandardMaterial({ color: 0x4a3620, roughness: 0.9 }));
+    door.position.set(0, 1.3, -d / 2 - 0.12);
+    g.add(door);
+    return g;
+  }
+
+  private makeFallbackRock(r: number): THREE.Mesh {
+    const m = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), new THREE.MeshStandardMaterial({ color: 0x8a7a62, roughness: 1, flatShading: true }));
+    m.position.y = r * 0.5;
+    m.scale.y = 0.62 + Math.random() * 0.2;
+    m.rotation.set(Math.random(), Math.random() * 3, Math.random());
+    m.castShadow = true;
+    m.receiveShadow = true;
+    return m;
+  }
+
+  private makeFallbackCrate(s: number): THREE.Mesh {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), new THREE.MeshStandardMaterial({ color: 0x8a6b3f, roughness: 0.95 }));
+    m.position.y = s / 2;
+    m.castShadow = true;
+    m.receiveShadow = true;
+    return m;
+  }
+
+  private makeFallbackBarrel(): THREE.Mesh {
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.46, 1.05, 12), new THREE.MeshStandardMaterial({ color: 0x6a4632, roughness: 0.75, metalness: 0.2 }));
+    m.position.y = 0.52;
+    m.castShadow = true;
+    return m;
+  }
+
+  private makeFallbackPallet(): THREE.Mesh {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.14, 1.5), new THREE.MeshStandardMaterial({ color: 0x8a6b3f, roughness: 0.95 }));
+    m.position.y = 0.07;
+    m.castShadow = true;
+    return m;
+  }
+
+  private makeFallbackSandbag(): THREE.Mesh {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(4, 1, 0.9), new THREE.MeshStandardMaterial({ color: 0xb3a276, roughness: 1 }));
+    m.position.y = 0.5;
+    m.castShadow = true;
+    m.receiveShadow = true;
+    return m;
+  }
+
+  private makeFallbackTower(): THREE.Group {
+    const legMat = new THREE.MeshStandardMaterial({ color: 0x5a4a30, roughness: 0.9 });
+    const topMat = new THREE.MeshStandardMaterial({ color: 0x77603c, roughness: 0.9 });
+    const t = new THREE.Group();
+    for (const [lx, lz] of [[-1.4, -1.4], [1.4, -1.4], [-1.4, 1.4], [1.4, 1.4]] as Array<[number, number]>) {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.5, 8, 0.5), legMat);
+      leg.position.set(lx, 4, lz);
+      leg.castShadow = true;
+      t.add(leg);
+    }
+    const plat = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.5, 4.6), topMat);
+    plat.position.y = 8;
+    plat.castShadow = true;
+    t.add(plat);
+    const roof = new THREE.Mesh(new THREE.ConeGeometry(3.6, 1.8, 4), topMat);
+    roof.position.y = 9.6;
+    roof.rotation.y = Math.PI / 4;
+    t.add(roof);
+    return t;
+  }
+
+  private makeFallbackTruck(): THREE.Group {
+    const g = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x6e7a52, roughness: 0.8 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x2a2a26, roughness: 0.9 });
+    const bed = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.9, 3.4), bodyMat);
+    bed.position.set(0, 0.75, 0.4);
+    bed.castShadow = true;
+    g.add(bed);
+    const cab = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.1, 1.5), bodyMat);
+    cab.position.set(0, 1.05, -1.6);
+    cab.castShadow = true;
+    g.add(cab);
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.5, 0.1), new THREE.MeshStandardMaterial({ color: 0x2a3a44, roughness: 0.2, metalness: 0.4 }));
+    glass.position.set(0, 1.25, -2.36);
+    g.add(glass);
+    for (const [wx, wz] of [[-1.05, -1.5], [1.05, -1.5], [-1.05, 1.3], [1.05, 1.3]] as Array<[number, number]>) {
+      const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.32, 12), darkMat);
+      wheel.rotation.z = Math.PI / 2;
+      wheel.position.set(wx, 0.42, wz);
+      wheel.castShadow = true;
+      g.add(wheel);
     }
     return g;
   }
+
+  private makeFallbackLamp(): THREE.Group {
+    const g = new THREE.Group();
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0x3a3a34, roughness: 0.7, metalness: 0.4 });
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.13, 4.4, 8), poleMat);
+    pole.position.y = 2.2;
+    pole.castShadow = true;
+    g.add(pole);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.09, 0.09), poleMat);
+    arm.position.set(0.55, 4.35, 0);
+    g.add(arm);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.16, 0.3), new THREE.MeshStandardMaterial({ color: 0xd8cfa8, roughness: 0.4, emissive: 0x554422, emissiveIntensity: 0.35 }));
+    head.position.set(1.05, 4.28, 0);
+    g.add(head);
+    return g;
+  }
+
+  private makePalm(): THREE.Group {
+    const g = new THREE.Group();
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x7a5c3a, roughness: 1 });
+    const leafMat = new THREE.MeshStandardMaterial({ color: 0x3e6e34, roughness: 0.9, side: THREE.DoubleSide });
+    const h = 6.5 + Math.random() * 2;
+    const segs = 4;
+    let lean = 0;
+    for (let i = 0; i < segs; i++) {
+      const s = new THREE.Mesh(new THREE.CylinderGeometry(0.22 - i * 0.03, 0.26 - i * 0.03, h / segs, 7), trunkMat);
+      lean += 0.1;
+      s.position.set(Math.sin(lean) * i * 0.3, (h / segs) * (i + 0.5), 0);
+      s.rotation.z = -lean * 0.4;
+      s.castShadow = true;
+      g.add(s);
+    }
+    const topY = h + 0.2;
+    const topX = Math.sin(lean) * segs * 0.3;
+    for (let i = 0; i < 7; i++) {
+      const leaf = new THREE.Mesh(new THREE.ConeGeometry(0.5, 3.4, 4, 1, true), leafMat);
+      leaf.position.set(topX, topY, 0);
+      leaf.rotation.z = Math.PI / 2 - 0.55;
+      leaf.rotation.y = (i / 7) * Math.PI * 2;
+      leaf.castShadow = true;
+      g.add(leaf);
+    }
+    return g;
+  }
+
+  private makeGrenadeBody(): THREE.Group {
+    const g = new THREE.Group();
+    const tpl = this.bank.get("grenade");
+    if (tpl) {
+      g.add(tpl.clone());
+      return g;
+    }
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.22, 10), new THREE.MeshStandardMaterial({ color: 0x3e4a2e, roughness: 0.55, metalness: 0.3 }));
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.06, 8), new THREE.MeshStandardMaterial({ color: 0x888474, roughness: 0.4, metalness: 0.6 }));
+    cap.position.y = 0.14;
+    g.add(body, cap);
+    return g;
+  }
+
+  /* اشیای پراکنده‌ی طعم‌دار (بشکه، پالت، چراغ، کامیون) */
+  private scatterFlavor() {
+    const zones: Array<[number, number, number, number, number]> = [
+      [-45, 45, -45, 45, 8],
+      [70, 160, -160, -70, 7],
+      [-160, -70, 70, 160, 7],
+      [-150, -60, -150, -60, 5],
+    ];
+    for (const [x0, x1, z0, z1, n] of zones) {
+      for (let i = 0; i < n; i++) {
+        const x = x0 + Math.random() * (x1 - x0);
+        const z = z0 + Math.random() * (z1 - z0);
+        if (this.pointBlocked(x, z, 1.3)) continue;
+        const pick = Math.random();
+        const ry = Math.random() * Math.PI * 2;
+        if (pick < 0.4) {
+          this.place("barrel", () => this.makeFallbackBarrel(), x, z, ry, 1.05 + Math.random() * 0.2);
+          this.cirCols.push({ x, z, r: 0.65 });
+        } else if (pick < 0.7) {
+          this.place("pallet", () => this.makeFallbackPallet(), x, z, ry, 0.5);
+          this.cirCols.push({ x, z, r: 0.9 });
+        } else {
+          this.place("crate", () => this.makeFallbackCrate(1.3), x, z, ry, 1.3);
+          this.cirCols.push({ x, z, r: 0.85 });
+        }
+      }
+    }
+    // کامیون‌های پارک‌شده
+    const trucks: Array<[number, number, number]> = [[30, -95, 0.6], [-95, 30, -2.2], [135, -45, 1.4]];
+    for (const [x, z, ry] of trucks) {
+      this.place("truck", () => this.makeFallbackTruck(), x, z, ry, 2.1);
+      this.boxCols.push({ x, z, hw: 2.4, hd: 1.5 });
+    }
+    // چراغ‌های خیابان کنار جاده‌ها
+    for (let i = -3; i <= 3; i++) {
+      if (i === 0) continue;
+      this.place("lamp", () => this.makeFallbackLamp(), 7.5, i * 42, Math.PI, 4.5);
+      this.place("lamp", () => this.makeFallbackLamp(), i * 42, -7.5, Math.PI / 2, 4.5);
+      this.cirCols.push({ x: 7.5, z: i * 42, r: 0.25 });
+      this.cirCols.push({ x: i * 42, z: -7.5, r: 0.25 });
+    }
+  }
+
+
 
   /* --- سازه‌های نقشه --- */
 
@@ -604,29 +848,12 @@ export class GameEngine {
       lip.position.set(x, 5.55, z);
       this.scene.add(lip);
     }
-    // برج‌های دیده‌بانی
-    const legMat = new THREE.MeshStandardMaterial({ color: 0x5a4a30, roughness: 0.9 });
-    const topMat = new THREE.MeshStandardMaterial({ color: 0x77603c, roughness: 0.9 });
+    // برج‌های دیده‌بانی (مدل دانلودی با جایگزین رویه‌ساز)
     for (const [tx, tz] of [[-WALL + 4, -WALL + 4], [WALL - 4, -WALL + 4], [-WALL + 4, WALL - 4], [WALL - 4, WALL - 4]] as Array<[number, number]>) {
-      const t = new THREE.Group();
+      this.place("tower", () => this.makeFallbackTower(), tx, tz, Math.atan2(tx, tz), 10.5);
       for (const [lx, lz] of [[-1.4, -1.4], [1.4, -1.4], [-1.4, 1.4], [1.4, 1.4]] as Array<[number, number]>) {
-        const leg = new THREE.Mesh(new THREE.BoxGeometry(0.5, 8, 0.5), legMat);
-        leg.position.set(lx, 4, lz);
-        leg.castShadow = true;
-        t.add(leg);
         this.cirCols.push({ x: tx + lx, z: tz + lz, r: 0.4 });
       }
-      const plat = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.5, 4.6), topMat);
-      plat.position.y = 8;
-      plat.castShadow = true;
-      t.add(plat);
-      this.blockers.push(plat);
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(3.6, 1.8, 4), topMat);
-      roof.position.y = 9.6;
-      roof.rotation.y = Math.PI / 4;
-      t.add(roof);
-      t.position.set(tx, 0, tz);
-      this.scene.add(t);
     }
   }
 
@@ -666,47 +893,18 @@ export class GameEngine {
     col.castShadow = true;
     this.scene.add(col);
 
-    // غرفه‌های بازار
-    const canopyCols = [0xa83232, 0x3a6a8a, 0xc9a23a, 0x4a7a4a];
+    // غرفه‌های بازار (مدل دانلودی با جایگزین رویه‌ساز)
     const stallSpots: Array<[number, number, number]> = [
       [-16, -14, 0.4], [16, -14, -0.3], [-16, 14, 2.7], [16, 14, 3.4],
       [-26, 0, 1.57], [26, 0, -1.57], [0, -26, 0], [0, 26, 3.14],
     ];
     stallSpots.forEach(([x, z, ry], i) => {
-      const stall = new THREE.Group();
-      const base = new THREE.Mesh(
-        new THREE.BoxGeometry(3.6, 1.1, 1.8),
-        new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.95 })
-      );
-      base.position.y = 0.55;
-      base.castShadow = true;
-      base.receiveShadow = true;
-      stall.add(base);
-      const canopy = new THREE.Mesh(
-        new THREE.BoxGeometry(4.2, 0.12, 2.6),
-        new THREE.MeshStandardMaterial({ color: canopyCols[i % canopyCols.length], roughness: 0.9 })
-      );
-      canopy.position.set(0, 2.35, 0);
-      canopy.rotation.x = 0.18;
-      canopy.castShadow = true;
-      stall.add(canopy);
-      for (const px of [-1.9, 1.9]) {
-        const pole = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.06, 0.06, 2.35, 6),
-          new THREE.MeshStandardMaterial({ color: 0x4a3a22, roughness: 0.9 })
-        );
-        pole.position.set(px, 1.17, 1.1);
-        stall.add(pole);
-      }
-      stall.position.set(x, 0, z);
-      stall.rotation.y = ry;
-      this.scene.add(stall);
-      this.addBox(base, x, z, 3.6, 1.8);
+      this.place("stall", () => this.makeFallbackStall(i), x, z, ry, 2.7);
+      this.boxCols.push({ x, z, hw: 1.8, hd: 0.9 });
+      this.addInvisibleBlocker(x, z, 3.6, 2.4, 1.8);
     });
 
-    // جعبه‌ها و کیسه‌شن
-    const crateMat = new THREE.MeshStandardMaterial({ color: 0x8a6b3f, roughness: 0.95 });
-    const sandMat = new THREE.MeshStandardMaterial({ color: 0xb3a276, roughness: 1 });
+    // جعبه‌ها و کیسه‌شن (مدل دانلودی با جایگزین رویه‌ساز)
     const crates: Array<[number, number, number, number]> = [
       [-8, -6, 2.2, 1], [8, -7, 2, 1], [-9, 7, 2, 2], [9, 8, 2.4, 1],
       [-22, -20, 2, 1], [22, -19, 2.2, 1], [-21, 20, 2, 2], [21, 21, 2, 1],
@@ -716,26 +914,20 @@ export class GameEngine {
     for (const [x, z, s, stack] of crates) {
       for (let k = 0; k <= stack; k++) {
         const ss = s - k * 0.3;
-        const m = new THREE.Mesh(new THREE.BoxGeometry(ss, ss, ss), crateMat);
-        m.position.set(x, ss / 2 + k * ss, z);
-        m.rotation.y = k * 0.3;
-        m.castShadow = true;
-        m.receiveShadow = true;
-        this.scene.add(m);
-        if (k === 0) this.addBox(m, x, z, s, s);
+        this.place("crate", () => this.makeFallbackCrate(ss), x, z, k * 0.3 + Math.random() * 0.2, ss);
+        const g = this.placements.get("crate")!;
+        if (k > 0) g[g.length - 1].group.position.y = k * s;
       }
+      this.boxCols.push({ x, z, hw: s / 2, hd: s / 2 });
+      this.addInvisibleBlocker(x, z, s, s * (stack + 1), s);
     }
     const bags: Array<[number, number, number]> = [
       [-5, -18, 0], [5, 18, 0], [-19, 4, 1.57], [19, -4, 1.57], [-36, -16, 0.6], [36, 16, -0.5],
     ];
     for (const [x, z, ry] of bags) {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(4, 1, 0.9), sandMat);
-      m.position.set(x, 0.5, z);
-      m.rotation.y = ry;
-      m.castShadow = true;
-      m.receiveShadow = true;
-      this.scene.add(m);
-      this.addBox(m, x, z, 4, 0.9);
+      this.place("sandbag", () => this.makeFallbackSandbag(), x, z, ry, 1);
+      this.boxCols.push({ x, z, hw: 2, hd: 0.45 });
+      this.addInvisibleBlocker(x, z, 4, 1, 0.9);
     }
   }
 
@@ -749,16 +941,13 @@ export class GameEngine {
         const z = -150 + k * 26;
         const stacked = (row + k) % 3 === 0;
         for (let h = 0; h < (stacked ? 2 : 1); h++) {
-          const m = new THREE.Mesh(
-            new THREE.BoxGeometry(6.4, 2.6, 2.5),
-            new THREE.MeshStandardMaterial({ color: cols[ci++ % cols.length], roughness: 0.8, metalness: 0.25 })
-          );
-          m.position.set(x, 1.3 + h * 2.6, z);
-          m.rotation.y = (row % 2) * 0.12;
-          m.castShadow = true;
-          m.receiveShadow = true;
-          this.scene.add(m);
-          if (h === 0) this.addBox(m, x, z, 6.6, 2.7);
+          const col = cols[ci++ % cols.length];
+          const g = this.place("container", () => this.makeFallbackContainer(col), x, z, (row % 2) * 0.12, 2.6);
+          g.position.y = h * 2.6;
+          if (h === 0) {
+            this.boxCols.push({ x, z, hw: 3.3, hd: 1.35 });
+            this.addInvisibleBlocker(x, z, 6.6, stacked ? 5.2 : 2.6, 2.7);
+          }
         }
       }
     }
@@ -784,32 +973,10 @@ export class GameEngine {
       for (let j = 0; j < 3; j++) {
         const x = -146 + i * 27;
         const z = 84 + j * 27;
-        const w = 14;
-        const d = 11;
-        const m = new THREE.Mesh(
-          new THREE.BoxGeometry(w, 5, d),
-          new THREE.MeshStandardMaterial({ color: wallCols[hi % wallCols.length], roughness: 0.95 })
-        );
-        m.position.set(x, 2.5, z);
-        m.castShadow = true;
-        m.receiveShadow = true;
-        this.scene.add(m);
-        this.addBox(m, x, z, w, d);
-        const roof = new THREE.Mesh(
-          new THREE.BoxGeometry(w + 1, 0.5, d + 1),
-          new THREE.MeshStandardMaterial({ color: 0x6e5a40, roughness: 1 })
-        );
-        roof.position.set(x, 5.25, z);
-        roof.castShadow = true;
-        this.scene.add(roof);
-        // درگاه
-        const door = new THREE.Mesh(
-          new THREE.BoxGeometry(1.6, 2.6, 0.3),
-          new THREE.MeshStandardMaterial({ color: 0x4a3620, roughness: 0.9 })
-        );
-        door.position.set(x, 1.3, z - d / 2 - 0.12);
-        this.scene.add(door);
-        hi++;
+        const col = wallCols[hi++ % wallCols.length];
+        this.place("house", () => this.makeFallbackHouse(col), x, z, ((i + j) % 2) * 0.16, 6.2);
+        this.boxCols.push({ x, z, hw: 7, hd: 5.5 });
+        this.addInvisibleBlocker(x, z, 14, 5, 11);
       }
     }
   }
@@ -838,57 +1005,19 @@ export class GameEngine {
       const r = 15 + ((i * 37) % 20);
       const x = ZONES.oasis.cx + Math.cos(a) * r;
       const z = ZONES.oasis.cz + Math.sin(a) * r;
-      const palm = this.makePalm();
-      palm.position.set(x, 0, z);
-      palm.rotation.y = Math.random() * Math.PI * 2;
-      this.scene.add(palm);
+      this.place("palm", () => this.makePalm(), x, z, Math.random() * Math.PI * 2, 6.5 + Math.random() * 2.5);
       this.cirCols.push({ x, z, r: 0.5 });
     }
   }
 
-  private makePalm(): THREE.Group {
-    const g = new THREE.Group();
-    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x7a5c3a, roughness: 1 });
-    const leafMat = new THREE.MeshStandardMaterial({ color: 0x3e6e34, roughness: 0.9, side: THREE.DoubleSide });
-    const h = 5.5 + Math.random() * 2;
-    const segs = 4;
-    let lean = 0;
-    for (let i = 0; i < segs; i++) {
-      const s = new THREE.Mesh(new THREE.CylinderGeometry(0.22 - i * 0.03, 0.26 - i * 0.03, h / segs, 7), trunkMat);
-      lean += 0.1;
-      s.position.set(Math.sin(lean) * i * 0.3, (h / segs) * (i + 0.5), 0);
-      s.rotation.z = -lean * 0.4;
-      s.castShadow = true;
-      g.add(s);
-    }
-    const topY = h + 0.2;
-    const topX = Math.sin(lean) * segs * 0.3;
-    for (let i = 0; i < 7; i++) {
-      const leaf = new THREE.Mesh(new THREE.ConeGeometry(0.5, 3.4, 4, 1, true), leafMat);
-      leaf.position.set(topX, topY, 0);
-      leaf.rotation.z = Math.PI / 2 - 0.55;
-      leaf.rotation.y = (i / 7) * Math.PI * 2;
-      leaf.castShadow = true;
-      g.add(leaf);
-    }
-    return g;
-  }
-
   private buildRocks() {
-    const rockMat = new THREE.MeshStandardMaterial({ color: 0x8a7a62, roughness: 1, flatShading: true });
     for (let i = 0; i < 17; i++) {
       const x = ZONES.rocks.x0 + Math.random() * (ZONES.rocks.x1 - ZONES.rocks.x0);
       const z = ZONES.rocks.z0 + Math.random() * (ZONES.rocks.z1 - ZONES.rocks.z0);
       const r = 1.6 + Math.random() * 2.6;
-      const m = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), rockMat);
-      m.position.set(x, r * 0.5, z);
-      m.scale.y = 0.62 + Math.random() * 0.2;
-      m.rotation.set(Math.random(), Math.random() * 3, Math.random());
-      m.castShadow = true;
-      m.receiveShadow = true;
-      this.scene.add(m);
-      this.blockers.push(m);
+      this.place("rock", () => this.makeFallbackRock(r), x, z, Math.random() * 3, r * 1.5);
       this.cirCols.push({ x, z, r: r * 0.95 });
+      this.addInvisibleBlocker(x, z, r * 1.7, r * 1.1, r * 1.7);
     }
     // تپه‌های شنی
     const duneMat = new THREE.MeshStandardMaterial({ color: 0xc6ad82, roughness: 1 });
@@ -1079,9 +1208,52 @@ export class GameEngine {
   }
 
   private attachVisual(s: Soldier) {
-    const tint = s.team === "ally" ? ALLY_TINT : TINTS[s.etype];
-    const finish = (model: THREE.Object3D, mixerRoot: THREE.Object3D, clips: { idle: THREE.AnimationClip; walk: THREE.AnimationClip; run: THREE.AnimationClip } | null) => {
-      if (s.gone) return;
+    if (!this.soldierBuffer) {
+      this.attachProcedural(s);
+      return;
+    }
+    void this.attachGlb(s);
+  }
+
+  private attachProcedural(s: Soldier) {
+    if (s.gone) return;
+    const rig = createProceduralSoldier(s.id);
+    s.rig = rig;
+    for (const m of rig.hitMeshes) {
+      m.userData.soldier = s;
+      s.hitMeshes.push(m);
+    }
+    const inner = new THREE.Group();
+    inner.add(rig.root);
+    s.visual.add(inner);
+    if (s.team === "ally") {
+      rig.root.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (m.isMesh) (m.material as THREE.MeshStandardMaterial).color.multiply(new THREE.Color(ALLY_TINT));
+      });
+    }
+  }
+
+  /** مدل + کلیپ‌ها از یک parse یکسان — بدون اشتراک‌گذاری کلیپ بین صحنه‌ها */
+  private async attachGlb(s: Soldier) {
+    try {
+      let g: GLTF | null = this.soldierPool.pop() ?? null;
+      this.refillSoldierPool();
+      if (!g && this.soldierBuffer) {
+        g = await new GLTFLoader().parseAsync(this.soldierBuffer, "");
+      }
+      if (!g || s.gone) return;
+      const usable = (g.animations as THREE.AnimationClip[]).filter(
+        (c) => c.tracks.length > 8 && !/tpose|t-?_?pose/i.test(c.name)
+      );
+      const find = (n: string) =>
+        usable.find((c) => c.name.toLowerCase() === n) ?? usable.find((c) => c.name.toLowerCase().includes(n));
+      const idle = find("idle");
+      const walk = find("walk");
+      const run = find("run");
+      if (!idle || !walk || !run) throw new Error("clips-missing");
+      const tint = s.team === "ally" ? ALLY_TINT : TINTS[s.etype];
+      const model = g.scene;
       const inner = new THREE.Group();
       inner.rotation.y = Math.PI; // مدل Mixamo رو به -Z است
       inner.add(model);
@@ -1099,45 +1271,36 @@ export class GameEngine {
           }
         }
       });
-      if (clips) {
-        s.mixer = new THREE.AnimationMixer(mixerRoot);
-        s.actions.idle = s.mixer.clipAction(clips.idle);
-        s.actions.walk = s.mixer.clipAction(clips.walk);
-        s.actions.run = s.mixer.clipAction(clips.run);
-        s.actions.idle.setEffectiveWeight(1).play();
-        s.actions.walk.setEffectiveWeight(0).play();
-        s.actions.run.setEffectiveWeight(0).play();
+      s.mixer = new THREE.AnimationMixer(model);
+      s.actions.idle = s.mixer.clipAction(idle).setLoop(THREE.LoopRepeat, Infinity);
+      s.actions.walk = s.mixer.clipAction(walk).setLoop(THREE.LoopRepeat, Infinity);
+      s.actions.run = s.mixer.clipAction(run).setLoop(THREE.LoopRepeat, Infinity);
+      s.actions.idle.setEffectiveWeight(1).play();
+      s.actions.walk.setEffectiveWeight(0).play();
+      s.actions.run.setEffectiveWeight(0).play();
+      s.mixer.update(0.016);
+    } catch {
+      if (!s.rig && !s.gone) this.attachProcedural(s);
+    }
+  }
+
+  /** استخر نمونه‌های از پیش parse شده تا اسپاون موج‌ها بدون لگ باشد */
+  private refillSoldierPool() {
+    if (this.poolBusy || !this.soldierBuffer || this.disposed) return;
+    if (this.soldierPool.length >= 3) return;
+    this.poolBusy = true;
+    const refill = async () => {
+      try {
+        while (this.soldierPool.length < 3 && this.soldierBuffer && !this.disposed) {
+          this.soldierPool.push(await new GLTFLoader().parseAsync(this.soldierBuffer, ""));
+        }
+      } catch {
+        /* ignore */
+      } finally {
+        this.poolBusy = false;
       }
     };
-
-    if (this.soldierBuffer && this.soldierClips) {
-      new GLTFLoader().parse(
-        this.soldierBuffer,
-        "",
-        (g) => finish(g.scene, g.scene, this.soldierClips),
-        () => {
-          const rig = createProceduralSoldier(s.id);
-          s.rig = rig;
-          finish(rig.root, rig.root, null);
-        }
-      );
-    } else {
-      const rig = createProceduralSoldier(s.id);
-      s.rig = rig;
-      for (const m of rig.hitMeshes) {
-        m.userData.soldier = s;
-        s.hitMeshes.push(m);
-      }
-      const inner = new THREE.Group();
-      inner.add(rig.root);
-      s.visual.add(inner);
-      if (s.team === "ally") {
-        rig.root.traverse((o) => {
-          const m = o as THREE.Mesh;
-          if (m.isMesh) (m.material as THREE.MeshStandardMaterial).color.multiply(new THREE.Color(ALLY_TINT));
-        });
-      }
-    }
+    void refill();
   }
 
   private removeSoldier(s: Soldier) {
@@ -1170,16 +1333,25 @@ export class GameEngine {
     for (const url of SOLDIER_URLS) {
       try {
         const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), 10000);
+        const t = setTimeout(() => ctrl.abort(), 12000);
         const res = await fetch(url, { signal: ctrl.signal });
         clearTimeout(t);
         if (!res.ok) continue;
         const buf = await res.arrayBuffer();
-        const clips = await this.probeClips(buf);
-        if (!clips) continue;
+        // اعتبارسنجی: یک بار parse و بررسی سه کلیپ
+        const probe: GLTF = await new GLTFLoader().parseAsync(buf, "");
+        const names = probe.animations.map((c) => c.name.toLowerCase());
+        if (
+          !names.some((n) => n.includes("idle")) ||
+          !names.some((n) => n.includes("walk")) ||
+          !names.some((n) => n.includes("run"))
+        ) {
+          continue;
+        }
         if (this.disposed) return;
         this.soldierBuffer = buf;
-        this.soldierClips = clips;
+        this.soldierPool.push(probe);
+        this.refillSoldierPool();
         this.modelSource = "glb";
         if (this.state === "menu") {
           this.clearSoldiers();
@@ -1194,27 +1366,6 @@ export class GameEngine {
     if (this.disposed) return;
     this.modelSource = "procedural";
     this.emitNow();
-  }
-
-  private probeClips(buf: ArrayBuffer): Promise<{ idle: THREE.AnimationClip; walk: THREE.AnimationClip; run: THREE.AnimationClip } | null> {
-    return new Promise((resolve) => {
-      new GLTFLoader().parse(
-        buf,
-        "",
-        (g) => {
-          const clips = (g.animations as THREE.AnimationClip[]).filter(
-            (c) => c.tracks.length > 8 && !/tpose|t-pose|t_pose/i.test(c.name)
-          );
-          const find = (n: string) =>
-            clips.find((c) => c.name.toLowerCase() === n) ?? clips.find((c) => c.name.toLowerCase().includes(n));
-          const idle = find("idle");
-          const walk = find("walk");
-          const run = find("run");
-          resolve(idle && walk && run ? { idle, walk, run } : null);
-        },
-        () => resolve(null)
-      );
-    });
   }
 
   /* ================= موج‌ها ================= */
@@ -2012,12 +2163,8 @@ export class GameEngine {
 
   private throwGrenade() {
     this.grenades--;
-    const g = new THREE.Group();
-    const ball = new THREE.Mesh(
-      new THREE.SphereGeometry(0.09, 10, 8),
-      new THREE.MeshStandardMaterial({ color: 0x4a5a2e, roughness: 0.5 })
-    );
-    g.add(ball);
+    const g = this.makeGrenadeBody();
+    g.scale.setScalar(0.42);
     const origin = new THREE.Vector3();
     this.camera.getWorldPosition(origin);
     const dir = new THREE.Vector3();
@@ -2433,26 +2580,45 @@ export class GameEngine {
       if (e.code === "Digit1") this.switchWeapon(0);
       if (e.code === "Digit2") this.switchWeapon(1);
       if (e.code === "Digit3") this.switchWeapon(2);
+      if (e.code === "KeyP") {
+        if (this.state === "play") this.pause();
+        else if (this.state === "paused") this.resume();
+      }
     }) as EventListener);
     on(document, "keyup", ((e: KeyboardEvent) => {
       this.keys.delete(e.code);
     }) as EventListener);
 
     on(document, "mousemove", ((e: MouseEvent) => {
-      if (document.pointerLockElement !== this.renderer.domElement || this.state !== "play") return;
-      this.yaw -= e.movementX * 0.0022;
-      this.pitch = THREE.MathUtils.clamp(this.pitch - e.movementY * 0.0022, -1.45, 1.45);
+      if (this.state !== "play") return;
+      const locked = document.pointerLockElement === this.renderer.domElement;
+      if (locked) {
+        this.yaw -= e.movementX * 0.0022;
+        this.pitch = THREE.MathUtils.clamp(this.pitch - e.movementY * 0.0022, -1.45, 1.45);
+      } else if (this.dragLook) {
+        // حالت کشیدنی (وقتی مرورگر اجازه‌ی قفل ماوس نمی‌دهد)
+        this.yaw -= (e.clientX - this.lastMX) * 0.0042;
+        this.pitch = THREE.MathUtils.clamp(this.pitch - (e.clientY - this.lastMY) * 0.0042, -1.45, 1.45);
+        this.lastMX = e.clientX;
+        this.lastMY = e.clientY;
+      }
     }) as EventListener);
 
     on(document, "mousedown", ((e: MouseEvent) => {
-      if (e.button === 0 && this.state === "play" && document.pointerLockElement === this.renderer.domElement) {
-        this.mouseDown = true;
-        this.mousePressed = true;
-        this.fireCd = Math.min(this.fireCd, 0);
+      if (e.button !== 0 || this.state !== "play") return;
+      const locked = document.pointerLockElement === this.renderer.domElement;
+      this.mouseDown = true;
+      this.mousePressed = true;
+      this.fireCd = Math.min(this.fireCd, 0);
+      if (!locked) {
+        this.dragLook = true;
+        this.lastMX = e.clientX;
+        this.lastMY = e.clientY;
       }
     }) as EventListener);
     on(document, "mouseup", (() => {
       this.mouseDown = false;
+      this.dragLook = false;
     }) as EventListener);
 
     on(window, "wheel", ((e: WheelEvent) => {
@@ -2553,6 +2719,19 @@ export class GameEngine {
     };
     setTimeout(retry, 600);
     setTimeout(retry, 1400);
+    // اگر مرورگر اصلاً قفل ماوس ندهد، با حالت کشیدنی ادامه می‌دهیم
+    setTimeout(() => {
+      if (this.disposed || this.state !== "paused") return;
+      if (document.pointerLockElement !== this.renderer.domElement) {
+        this.state = "play";
+        this.emitNow();
+      }
+    }, 2300);
+  }
+
+  /** از کلیک مستقیم کاربر صدا زده می‌شود */
+  lockPointer() {
+    this.requestLock();
   }
 
   pause() {
@@ -2578,6 +2757,9 @@ export class GameEngine {
       state: this.state,
       modelSource: this.modelSource,
       propsSource: this.propsSource,
+      assetsLoaded: this.assetsLoaded,
+      assetsTotal: this.assetsTotal,
+      locked: document.pointerLockElement === this.renderer.domElement,
       health: Math.ceil(this.health),
       armor: Math.ceil(this.armor),
       ammo: w.melee ? -1 : this.ammoArr[this.slot],
