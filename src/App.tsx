@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { GameEngine, type HudState } from "./game/engine";
+import { GameEngine, BUY_ITEMS, type HudState } from "./game/engine";
 import { sfx } from "./game/audio";
 
 /* ---------------- آیکون‌های SVG ---------------- */
@@ -64,6 +64,12 @@ const KnifeIcon = ({ className = "w-4 h-4" }: { className?: string }) => (
   </svg>
 );
 
+const CashIcon = ({ className = "w-4 h-4" }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
+    <path d="M2 7h20v10H2V7Zm2 2v6h16V9H4Zm8 1a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm-6 1h2v2H6v-2Zm10 0h2v2h-2v-2Z" />
+  </svg>
+);
+
 /* ---------------- ابزار ---------------- */
 
 const fmtTime = (t: number) => {
@@ -103,6 +109,14 @@ const initialHud: HudState = {
   bannerText: "",
   bannerKind: "wave",
   stats: null,
+  money: 800,
+  buyOpen: false,
+  scoping: false,
+  best: 0,
+  ownedPrimaries: ["ak"],
+  primaryId: "ak",
+  dmgDirs: [],
+  storm: false,
 };
 
 const WEAPON_SLOTS = [
@@ -228,14 +242,46 @@ export default function App() {
             </div>
           )}
 
-          {/* کراس‌هیر */}
-          {hud.state === "play" && (
+          {/* کراس‌هیر (هنگام اسکوپ پنهان می‌شود) */}
+          {hud.state === "play" && !hud.scoping && (
             <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
               <div className="absolute w-[2px] h-3 bg-[#9dff5a] shadow-[0_0_4px_rgba(120,255,60,0.9)]" style={{ left: -1, top: -gap - 12 }} />
               <div className="absolute w-[2px] h-3 bg-[#9dff5a] shadow-[0_0_4px_rgba(120,255,60,0.9)]" style={{ left: -1, top: gap }} />
               <div className="absolute h-[2px] w-3 bg-[#9dff5a] shadow-[0_0_4px_rgba(120,255,60,0.9)]" style={{ top: -1, left: -gap - 12 }} />
               <div className="absolute h-[2px] w-3 bg-[#9dff5a] shadow-[0_0_4px_rgba(120,255,60,0.9)]" style={{ top: -1, left: gap }} />
               <div className="absolute w-[3px] h-[3px] rounded-full bg-[#9dff5a]/80" style={{ left: -1.5, top: -1.5 }} />
+            </div>
+          )}
+
+          {/* اسکوپ اسنایپر AWP */}
+          {hud.state === "play" && hud.scoping && (
+            <div className="absolute inset-0 pointer-events-none">
+              <div className="absolute inset-0" style={{ background: "radial-gradient(circle at center, transparent 30%, rgba(0,0,0,0.98) 36%)" }} />
+              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[62vmin] h-[62vmin] rounded-full border-2 border-black/90" />
+              <div className="absolute left-1/2 top-1/2 w-[62vmin] h-[2px] -translate-x-1/2 -translate-y-1/2 bg-black/80" />
+              <div className="absolute left-1/2 top-1/2 h-[62vmin] w-[2px] -translate-x-1/2 -translate-y-1/2 bg-black/80" />
+              <div className="absolute left-1/2 top-1/2 w-1.5 h-1.5 rounded-full bg-[#ff4b3a] -translate-x-1/2 -translate-y-1/2" />
+            </div>
+          )}
+
+          {/* نشانگر جهت آسیب */}
+          {hud.state === "play" &&
+            hud.dmgDirs.map((d) => (
+              <div
+                key={d.id}
+                className="absolute left-1/2 top-1/2 anim-hit"
+                style={{ transform: `translate(-50%,-50%) rotate(${d.deg}deg)` }}
+              >
+                <div className="w-0 h-0" style={{ transform: "translateY(-90px)", borderLeft: "14px solid transparent", borderRight: "14px solid transparent", borderBottom: "30px solid rgba(255,60,40,0.75)" }} />
+              </div>
+            ))}
+
+          {/* نشانگر طوفان شن */}
+          {hud.state === "play" && hud.storm && (
+            <div className="absolute top-16 left-1/2 -translate-x-1/2">
+              <div className="clip-tag bg-[#c9922e]/90 border border-[#ffb03a]/40 px-5 py-1.5 anim-blink">
+                <span className="font-stencil text-sm text-[#17130a]">طوفان شن — دید محدود</span>
+              </div>
             </div>
           )}
 
@@ -281,6 +327,14 @@ export default function App() {
               <span className="text-[11px] font-bold text-[#d8c49a]/70 flex items-center gap-1"><Bolt className="w-3.5 h-3.5" /> امتیاز</span>
               <span className="num text-xl text-[#ffb03a] leading-none">{hud.score.toLocaleString("en-US")}</span>
             </div>
+            <div className="flex items-center justify-between gap-4 mt-2">
+              <span className="text-[11px] font-bold text-[#d8c49a]/70 flex items-center gap-1"><CashIcon className="w-3.5 h-3.5" /> پول</span>
+              <span className="num text-xl text-[#9dff5a] leading-none">${hud.money.toLocaleString("en-US")}</span>
+            </div>
+            <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-center gap-2">
+              <span className="text-[10px] font-bold text-[#d8c49a]/50">فروشگاه:</span>
+              <span className="num text-[11px] bg-black/50 border border-[#ffb03a]/25 text-[#ffb03a] px-2 py-0.5">B</span>
+            </div>
           </div>
 
           {/* کیل‌فید */}
@@ -320,20 +374,24 @@ export default function App() {
 
           {/* پایین-وسط: جای سلاح‌ها و نارنجک */}
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-end gap-2">
-            {WEAPON_SLOTS.map((w, i) => (
-              <div
-                key={w.name}
-                className={`clip-tag px-4 py-2 flex items-center gap-2 border transition-all duration-150 ${
-                  hud.slot === i
-                    ? "bg-[#ffb03a] text-[#17130a] border-[#ffb03a] -translate-y-1"
-                    : "bg-[#17130a]/80 text-[#d8c49a]/60 border-white/10"
-                }`}
-              >
-                <span className={`num text-[10px] ${hud.slot === i ? "text-[#17130a]/70" : "text-[#d8c49a]/40"}`}>{w.key}</span>
-                {w.icon}
-                <span className="text-[11px] font-bold">{w.name}</span>
-              </div>
-            ))}
+            {WEAPON_SLOTS.map((w, i) => {
+              const primaryLabel: Record<string, string> = { ak: "کلاشینکف", mp5: "MP5", shotgun: "شاتگان", awp: "AWP" };
+              const label = i === 0 ? primaryLabel[hud.primaryId] ?? w.name : w.name;
+              return (
+                <div
+                  key={w.name}
+                  className={`clip-tag px-4 py-2 flex items-center gap-2 border transition-all duration-150 ${
+                    hud.slot === i
+                      ? "bg-[#ffb03a] text-[#17130a] border-[#ffb03a] -translate-y-1"
+                      : "bg-[#17130a]/80 text-[#d8c49a]/60 border-white/10"
+                  }`}
+                >
+                  <span className={`num text-[10px] ${hud.slot === i ? "text-[#17130a]/70" : "text-[#d8c49a]/40"}`}>{w.key}</span>
+                  {w.icon}
+                  <span className="text-[11px] font-bold">{label}</span>
+                </div>
+              );
+            })}
             <div className="clip-tag px-4 py-2 flex items-center gap-2 bg-[#17130a]/80 border border-white/10 text-[#d8c49a]">
               <GrenadeIcon className="w-4 h-4 text-[#9dff5a]" />
               <div className="flex gap-1">
@@ -428,6 +486,9 @@ export default function App() {
                 ["G", "پرتاب نارنجک"],
                 ["1 / 2 / 3", "تعویض سلاح"],
                 ["WHEEL", "تعویض سریع سلاح"],
+                ["R-CLICK", "نشانه‌گیری / اسکوپ"],
+                ["Q", "تعویض سلاح اصلی"],
+                ["B", "فروشگاه تسلیحات"],
                 ["ESC / P", "توقف عملیات"],
               ].map(([k, v]) => (
                 <div key={k} className="flex items-center justify-between py-1.5 border-b border-white/5 last:border-0">
@@ -440,6 +501,12 @@ export default function App() {
 
           {/* شروع */}
           <div className="absolute bottom-14 right-8 md:right-14 anim-rise" style={{ animationDelay: "0.5s" }}>
+            {hud.best > 0 && (
+              <div className="text-left mb-3">
+                <span className="text-[11px] font-bold text-[#d8c49a]/60">بهترین امتیاز: </span>
+                <span className="num text-lg text-[#ffb03a]">{hud.best.toLocaleString("en-US")}</span>
+              </div>
+            )}
             <button
               className="btn-mil text-xl px-12 py-4 pointer-events-auto"
               onClick={() => {
@@ -456,6 +523,68 @@ export default function App() {
           </div>
 
           <div className="absolute bottom-0 inset-x-0 h-[3px] bg-gradient-to-l from-transparent via-[#ffb03a] to-transparent opacity-60" />
+        </div>
+      )}
+
+      {/* ================= فروشگاه (B) ================= */}
+      {hud.buyOpen && (
+        <div className="absolute inset-0 bg-[#0c0f09]/80 backdrop-blur-[3px] flex items-center justify-center">
+          <div className="hud-panel clip-panel p-7 w-[560px] max-w-[92vw] anim-rise">
+            <div className="flex items-center justify-between mb-5">
+              <div>
+                <div className="font-stencil text-[#ffb03a] text-xs tracking-[0.3em] mb-1">ARMORY</div>
+                <h2 className="text-2xl font-black">فروشگاه تسلیحات</h2>
+              </div>
+              <div className="text-left">
+                <div className="flex items-center gap-2 text-[#9dff5a]">
+                  <CashIcon className="w-5 h-5" />
+                  <span className="num text-3xl">${hud.money.toLocaleString("en-US")}</span>
+                </div>
+                <div className="text-[10px] text-[#d8c49a]/50 mt-1">بهترین امتیاز: <span className="num text-[#ffb03a]">{hud.best.toLocaleString("en-US")}</span></div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              {BUY_ITEMS.map((item) => {
+                const owned = item.primary ? hud.ownedPrimaries.includes(item.primary) : false;
+                const active = item.primary === hud.primaryId;
+                const afford = hud.money >= item.price;
+                return (
+                  <button
+                    key={item.id}
+                    disabled={owned || !afford}
+                    onClick={() => { sfx.click(); eng()?.purchase(item.id); }}
+                    className={`clip-panel text-right p-3 border transition-all duration-150 ${
+                      active
+                        ? "border-[#9dff5a] bg-[#9dff5a]/10"
+                        : owned
+                          ? "border-white/10 bg-black/30 opacity-50"
+                          : afford
+                            ? "border-[#ffb03a]/30 bg-[#17130a]/60 hover:border-[#ffb03a] hover:bg-[#ffb03a]/10 cursor-pointer"
+                            : "border-white/10 bg-black/30 opacity-40"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-sm text-[#e9e4d4]">{item.label}</span>
+                      <span className={`num text-sm font-bold ${owned ? "text-[#9dff5a]" : "text-[#ffb03a]"}`}>
+                        {active ? "فعال" : owned ? "دارید" : `$${item.price}`}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-[#d8c49a]/60 mt-1 leading-4">{item.desc}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-5 flex items-center justify-between">
+              <div className="text-[11px] text-[#d8c49a]/50">
+                Q = تعویض سلاح اصلی • پول با هر کشتار به دست می‌آید
+              </div>
+              <button className="btn-mil px-8 py-2.5" onClick={() => { sfx.click(); eng()?.closeBuy(); }}>
+                بازگشت به نبرد
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

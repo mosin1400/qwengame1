@@ -94,11 +94,15 @@ interface BoneRig {
   legR: THREE.Object3D | null;
   kneeL: THREE.Object3D | null;
   kneeR: THREE.Object3D | null;
+  handL: THREE.Object3D | null;
   handR: THREE.Object3D | null;
   hipsY: number;
   phase: number;
   aimK: number;
   recoil: number;
+  /** چرخش استراحتِ اندازه‌گیری‌شده‌ی بازوها (دست‌ها پایین — ضد تی‌پوز) */
+  armRestL: number;
+  armRestR: number;
 }
 
 function pickWeaponKind(team: "enemy" | "ally", etype: EType, nameIdx: number): WKind {
@@ -1658,23 +1662,45 @@ export class GameEngine {
       legR: this.findBone(model, ["rightupleg"]),
       kneeL: this.findBone(model, ["leftleg"]),
       kneeR: this.findBone(model, ["rightleg"]),
+      handL: this.findBone(model, ["lefthand"]),
       handR: this.findBone(model, ["righthand"]),
       hipsY: 0,
       phase: Math.random() * 10,
       aimK: 0,
       recoil: 0,
+      armRestL: 0,
+      armRestR: 0,
     };
     if (b.hips) b.hipsY = b.hips.position.y;
-    // حالت استراحت: بازوها پایین — مدل هرگز تی‌پوز نمی‌ماند
-    if (b.armR) {
-      b.armR.rotation.set(0, 0, -1.3);
-    }
-    if (b.armL) {
-      b.armL.rotation.set(0, 0, 1.3);
-    }
-    if (b.foreR) b.foreR.rotation.z = -0.12;
-    if (b.foreL) b.foreL.rotation.z = 0.12;
+    // حالت استراحت با اندازه‌گیری: هر چرخشی که دست را پایین‌تر بیاورد انتخاب می‌شود.
+    // این روش مستقل از جهت استخوان‌هاست و تی‌پوز را غیرممکن می‌کند.
+    b.armRestL = this.measureArmRest(model, b.armL, b.handL);
+    b.armRestR = this.measureArmRest(model, b.armR, b.handR);
+    if (b.foreR) b.foreR.rotation.x = -0.25;
+    if (b.foreL) b.foreL.rotation.x = -0.25;
     s.bones = b;
+  }
+
+  /** چرخش بازو حول Z را طوری انتخاب می‌کند که دست تا حد ممکن پایین بیاید (آویزان شود) */
+  private measureArmRest(model: THREE.Object3D, arm: THREE.Object3D | null, hand: THREE.Object3D | null): number {
+    if (!arm) return 0;
+    const probe = hand ?? arm;
+    const tmp = new THREE.Vector3();
+    const candidates = [0, 0.7, -0.7, 1.3, -1.3, 1.6, -1.6];
+    let bestZ = 0;
+    let bestY = Infinity;
+    for (const z of candidates) {
+      arm.rotation.set(0, 0, z);
+      model.updateMatrixWorld(true);
+      probe.getWorldPosition(tmp);
+      if (tmp.y < bestY) {
+        bestY = tmp.y;
+        bestZ = z;
+      }
+    }
+    arm.rotation.set(0, 0, bestZ);
+    model.updateMatrixWorld(true);
+    return bestZ;
   }
 
   private updateBones(b: BoneRig, dt: number, speed: number, aiming: boolean, isRunner: boolean) {
@@ -1684,33 +1710,27 @@ export class GameEngine {
     b.aimK += ((aiming ? 1 : 0) - b.aimK) * Math.min(1, dt * 7);
     const a = b.aimK;
     const w = 1 - a;
+    // پاها
     if (b.legL && b.legR) {
-      b.legL.rotation.x = sw * 0.5 * k * w + a * 0.05;
-      b.legR.rotation.x = -sw * 0.5 * k * w - a * 0.1;
+      b.legL.rotation.x = sw * 0.55 * k * w;
+      b.legR.rotation.x = -sw * 0.55 * k * w;
     }
     if (b.kneeL && b.kneeR) {
-      b.kneeL.rotation.x = Math.max(0, -sw) * 0.65 * k * w + a * 0.1;
-      b.kneeR.rotation.x = Math.max(0, sw) * 0.65 * k * w + a * 0.22;
+      b.kneeL.rotation.x = Math.max(0, -sw) * 0.7 * k * w;
+      b.kneeR.rotation.x = Math.max(0, sw) * 0.7 * k * w;
     }
-    if (b.hips) b.hips.position.y = b.hipsY + Math.abs(Math.cos(b.phase)) * 0.035 * k * w;
-    if (b.chest) b.chest.rotation.x = (0.1 * k + sw * 0.02 * k) * w + 0.06 * a;
-    if (b.head) b.head.rotation.x = -0.08 * a;
-    if (b.armL && b.armR) {
-      const amp = 0.42 * k * w;
-      b.armL.rotation.x = -sw * amp - 1.1 * a;
-      b.armR.rotation.x = sw * amp - 0.5 * a - b.recoil;
-      b.armL.rotation.z = 1.3 * w + 0.55 * a;
-      b.armR.rotation.z = -1.3 * w - 0.7 * a;
-      b.armL.rotation.y = -0.55 * a;
-      b.armR.rotation.y = 0.35 * a;
+    if (b.hips) b.hips.position.y = b.hipsY + Math.abs(Math.cos(b.phase)) * 0.04 * k * w;
+    if (b.chest) b.chest.rotation.x = 0.08 * k * w;
+    // بازوها: چرخش استراحت (پایین) + نوسان کوچک جلو/عقب هنگام راه‌رفتن
+    const amp = 0.45 * k * w;
+    if (b.armL) {
+      b.armL.rotation.set(-sw * amp, 0, b.armRestL);
     }
-    if (b.foreL && b.foreR) {
-      const eb = 0.4 * k * w;
-      b.foreL.rotation.x = -0.12 * w - Math.max(0, sw) * eb - 0.55 * a;
-      b.foreR.rotation.x = -0.12 * w - Math.max(0, -sw) * eb - 0.3 * a;
-      b.foreL.rotation.z = 0.12 * w - 0.25 * a;
-      b.foreR.rotation.z = -0.12 * w;
+    if (b.armR) {
+      b.armR.rotation.set(sw * amp - b.recoil, 0, b.armRestR);
     }
+    if (b.foreL) b.foreL.rotation.x = -0.25 * w;
+    if (b.foreR) b.foreR.rotation.x = -0.25 * w;
     b.recoil *= Math.exp(-13 * dt);
   }
 
@@ -1826,8 +1846,10 @@ export class GameEngine {
           }
         }
       });
-      // انیمیشن واقعی Mixamo — کلیپ‌های Idle/Walk/Run از همان parse.
-      // هیچ چرخش دستی روی استخوان‌ها اعمال نمی‌شود تا با میکسر تداخل نکند.
+      // ۱) حالت استراحت (دست‌ها پایین) — حتی اگر انیمیشن کار نکرد، تی‌پوز نمی‌شود
+      this.setupBones(s, model);
+
+      // ۲) انیمیشن واقعی Mixamo — کلیپ‌های Idle/Walk/Run از همان parse
       const clips = (g.animations as THREE.AnimationClip[]).filter(
         (c) => c.tracks.length > 8 && !/tpose|t-?_?pose/i.test(c.name)
       );
@@ -1845,7 +1867,24 @@ export class GameEngine {
       s.actions.walk.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
       s.actions.run.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
       s.band = "idle";
-      s.mixer.update(0.016);
+
+      // ۳) اعتبارسنجی: با کلیپ Walk (حرکت زیاد) تست می‌کنیم که میکسر واقعاً
+      //    استخوان‌ها را می‌چرخاند. اگر نه، میکسر را حذف می‌کنیم تا ریگ استخوانی
+      //    (updateBones) با حالت استراحتِ صحیح کنترل را به دست بگیرد.
+      const probe = s.bones?.armR ?? s.bones?.legL ?? s.bones?.chest;
+      if (probe && s.actions.walk) {
+        const before = probe.rotation.x + probe.rotation.y + probe.rotation.z;
+        s.actions.idle.setEffectiveWeight(0);
+        s.actions.walk.setEffectiveWeight(1);
+        s.mixer.update(0.25);
+        const after = probe.rotation.x + probe.rotation.y + probe.rotation.z;
+        s.actions.walk.setEffectiveWeight(0);
+        s.actions.idle.setEffectiveWeight(1);
+        if (Math.abs(after - before) < 0.01) {
+          s.mixer = null; // انیمیشن bind نشد — ریگ استخوانی جایگزین می‌شود
+        }
+      }
+      if (s.mixer) s.mixer.update(0.016);
     } catch {
       // مدل یا کلیپ‌ها ناقص بودند — مدل GLB را بردار و سرباز رویه‌ساز بگذار (هرگز تی‌پوز نمی‌شود)
       if (!s.gone && !s.rig) {
