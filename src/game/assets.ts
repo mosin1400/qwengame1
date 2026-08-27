@@ -15,8 +15,9 @@ export type SlotName =
   | "wpn-ak" | "wpn-pistol" | "wpn-knife" | "grenade";
 
 interface SlotDef {
-  kw: string;            // کلیدواژه‌ی جستجوی poly.pizza
+  kw: string | string[]; // کلیدواژه‌های جستجوی poly.pizza (به ترتیب امتحان می‌شوند)
   ph?: string;           // زیرنام برای جستجو در فهرست Poly Haven
+  cat?: number;          // دسته‌بندی poly.pizza (2 = سلاح)
   h?: number;            // ارتفاع هدف نرمال‌سازی
   len?: number;          // طول هدف (سلاح‌ها)
   weapon?: boolean;
@@ -36,9 +37,9 @@ export const SLOT_DEFS: Record<SlotName, SlotDef> = {
   tower:      { kw: "watchtower", h: 10.5 },
   truck:      { kw: "pickup truck", h: 2.1 },
   lamp:       { kw: "street lamp", ph: "lamp", h: 4.5 },
-  "wpn-ak":     { kw: "ak-47", len: 0.92, weapon: true, gripZ: 0.14 },
-  "wpn-pistol": { kw: "pistol gun", len: 0.26, weapon: true, gripZ: 0.03 },
-  "wpn-knife":  { kw: "combat knife", len: 0.34, weapon: true, gripZ: 0.02 },
+  "wpn-ak":     { kw: ["ak-47", "assault rifle", "rifle", "gun"], cat: 2, len: 0.92, weapon: true, gripZ: 0.14 },
+  "wpn-pistol": { kw: ["pistol", "handgun", "gun"], cat: 2, len: 0.26, weapon: true, gripZ: 0.03 },
+  "wpn-knife":  { kw: ["knife", "combat knife", "dagger"], cat: 2, len: 0.34, weapon: true, gripZ: 0.02 },
   grenade:    { kw: "grenade", h: 0.3 },
 };
 
@@ -219,29 +220,33 @@ export class AssetBank {
         }
       }
     }
-    // ۲) poly.pizza (CC-BY) — دو قالب API امتحان می‌شود
-    const endpoints = [
-      `https://api.poly.pizza/v1.1/search/${encodeURIComponent(def.kw)}?Limit=6`,
-      `https://api.poly.pizza/v1/search/${encodeURIComponent(def.kw)}?Limit=6`,
-    ];
-    for (const ep of endpoints) {
-      try {
-        const res = await fetchT(ep, 9000);
-        if (!res.ok) continue;
-        const json: unknown = await res.json();
-        const url = findGlbUrl(json);
-        if (!url) continue;
-        const gltf = await this.loader.loadAsync(url);
-        if (def.weapon) {
-          const rig = normalizeWeapon(gltf.scene, def);
-          (rig.obj as THREE.Group & { userData: Record<string, unknown> }).userData.muzzle = rig.muzzle;
-          this.publish(slot, rig.obj);
-        } else {
-          this.publish(slot, normalizeProp(gltf.scene, def.h ?? 1));
+    // ۲) poly.pizza (CC-BY) — چند کلیدواژه و دو قالب API امتحان می‌شود
+    const kws = Array.isArray(def.kw) ? def.kw : [def.kw];
+    const catQ = def.cat !== undefined ? `&Category=${def.cat}` : "";
+    for (const kw of kws) {
+      const endpoints = [
+        `https://api.poly.pizza/v1.1/search/${encodeURIComponent(kw)}?Limit=6${catQ}`,
+        `https://api.poly.pizza/v1/search/${encodeURIComponent(kw)}?Limit=6${catQ}`,
+      ];
+      for (const ep of endpoints) {
+        try {
+          const res = await fetchT(ep, 9000);
+          if (!res.ok) continue;
+          const json: unknown = await res.json();
+          const url = findGlbUrl(json);
+          if (!url) continue;
+          const gltf = await this.loader.loadAsync(url);
+          if (def.weapon) {
+            const rig = normalizeWeapon(gltf.scene, def);
+            (rig.obj as THREE.Group & { userData: Record<string, unknown> }).userData.muzzle = rig.muzzle;
+            this.publish(slot, rig.obj);
+          } else {
+            this.publish(slot, normalizeProp(gltf.scene, def.h ?? 1));
+          }
+          return;
+        } catch {
+          /* قالب بعدی */
         }
-        return;
-      } catch {
-        /* قالب بعدی */
       }
     }
     // ۳) نشد — رویه‌ساز می‌ماند

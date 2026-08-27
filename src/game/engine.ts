@@ -271,6 +271,8 @@ export class GameEngine {
   private mouseDown = false;
   private mousePressed = false;
   private sprinting = false;
+  private adsDown = false;
+  private adsK = 0;
   private bobT = 0;
   private stepAcc = 0;
   private stepAlt = false;
@@ -1751,10 +1753,8 @@ export class GameEngine {
           }
         }
       });
-      // حالت استراحت استخوان‌ها (ضد تی‌پوز) + ریگ پشتیبان
-      this.setupBones(s, model);
-
-      // انیمیشن واقعی Mixamo — کلیپ‌های Idle/Walk/Run از همان parse
+      // انیمیشن واقعی Mixamo — کلیپ‌های Idle/Walk/Run از همان parse.
+      // هیچ چرخش دستی روی استخوان‌ها اعمال نمی‌شود تا با میکسر تداخل نکند.
       const clips = (g.animations as THREE.AnimationClip[]).filter(
         (c) => c.tracks.length > 8 && !/tpose|t-?_?pose/i.test(c.name)
       );
@@ -1763,19 +1763,24 @@ export class GameEngine {
       const idle = find("idle");
       const walk = find("walk");
       const run = find("run");
-      if (idle && walk && run) {
-        s.mixer = new THREE.AnimationMixer(model);
-        s.actions.idle = s.mixer.clipAction(idle);
-        s.actions.walk = s.mixer.clipAction(walk);
-        s.actions.run = s.mixer.clipAction(run);
-        s.actions.idle.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(1).play();
-        s.actions.walk.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
-        s.actions.run.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
-        s.band = "idle";
-        s.mixer.update(0.016);
-      }
+      if (!idle || !walk || !run) throw new Error("mixamo-clips-missing");
+      s.mixer = new THREE.AnimationMixer(model);
+      s.actions.idle = s.mixer.clipAction(idle);
+      s.actions.walk = s.mixer.clipAction(walk);
+      s.actions.run = s.mixer.clipAction(run);
+      s.actions.idle.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(1).play();
+      s.actions.walk.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
+      s.actions.run.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
+      s.band = "idle";
+      s.mixer.update(0.016);
     } catch {
-      if (!s.rig && !s.gone) this.attachProcedural(s);
+      // مدل یا کلیپ‌ها ناقص بودند — مدل GLB را بردار و سرباز رویه‌ساز بگذار (هرگز تی‌پوز نمی‌شود)
+      if (!s.gone && !s.rig) {
+        s.visual.clear();
+        s.hitMeshes.length = 0;
+        s.mixer = null;
+        this.attachProcedural(s);
+      }
     }
   }
 
@@ -2392,14 +2397,16 @@ export class GameEngine {
     const w = WEAPONS[this.slot];
     if (w.melee) return 0;
     const moveK = THREE.MathUtils.clamp(Math.hypot(this.vel.x, this.vel.z) / 6.4, 0, 1);
-    return w.spread + moveK * 0.005 + this.heat * 0.012;
+    return (w.spread + moveK * 0.005 + this.heat * 0.012) * (1 - this.adsK * 0.8);
   }
 
   private updatePlayer(dt: number) {
     const f = (this.keys.has("KeyW") ? 1 : 0) - (this.keys.has("KeyS") ? 1 : 0);
     const st = (this.keys.has("KeyD") ? 1 : 0) - (this.keys.has("KeyA") ? 1 : 0);
-    this.sprinting = (this.keys.has("ShiftLeft") || this.keys.has("ShiftRight")) && f > 0;
-    const spd = this.sprinting ? 9 : 4.6;
+    const wantAds = this.adsDown && !WEAPONS[this.slot].melee;
+    this.adsK += ((wantAds ? 1 : 0) - this.adsK) * Math.min(1, dt * 11);
+    this.sprinting = (this.keys.has("ShiftLeft") || this.keys.has("ShiftRight")) && f > 0 && !wantAds;
+    const spd = (this.sprinting ? 9 : 4.6) * (1 - this.adsK * 0.42);
 
     const sinY = Math.sin(this.yaw);
     const cosY = Math.cos(this.yaw);
@@ -2441,7 +2448,7 @@ export class GameEngine {
     this.kick += this.kickV * dt;
     this.camera.rotation.set(this.pitch + this.kick * 0.05, this.yaw, st * -0.012 * moveK);
 
-    const targetFov = this.sprinting && moveK > 0.5 ? 82 : 74;
+    const targetFov = this.sprinting && moveK > 0.5 ? 82 : 74 - this.adsK * 20;
     this.fov += (targetFov - this.fov) * Math.min(1, dt * 8);
     if (Math.abs(this.camera.fov - this.fov) > 0.05) {
       this.camera.fov = this.fov;
@@ -2781,12 +2788,13 @@ export class GameEngine {
     this.pushZ *= Math.exp(-11 * dt);
     const moveK = THREE.MathUtils.clamp(Math.hypot(this.vel.x, this.vel.z) / 9, 0, 1);
     const w = WEAPONS[this.slot];
-    const baseX = w.melee ? 0.34 : 0.24;
-    const baseY = w.melee ? -0.28 : -0.22;
+    const bobAmp = 1 - this.adsK * 0.85;
+    const baseX = w.melee ? 0.34 : 0.24 * (1 - this.adsK);
+    const baseY = w.melee ? -0.28 : -0.22 + 0.055 * this.adsK;
     this.gun.position.set(
-      baseX + Math.sin(this.bobT * 1.7) * 0.008 * moveK,
-      baseY + Math.abs(Math.cos(this.bobT * 1.7)) * 0.01 * moveK,
-      -0.45 + this.pushZ
+      baseX + Math.sin(this.bobT * 1.7) * 0.008 * moveK * bobAmp,
+      baseY + Math.abs(Math.cos(this.bobT * 1.7)) * 0.01 * moveK * bobAmp,
+      -0.45 + 0.14 * this.adsK + this.pushZ
     );
 
     let rx = 0;
@@ -3075,20 +3083,29 @@ export class GameEngine {
     on(document, "mousemove", ((e: MouseEvent) => {
       if (this.state !== "play") return;
       const locked = document.pointerLockElement === this.renderer.domElement;
+      const sens = 0.0022 * (1 - this.adsK * 0.45); // نشانه‌گیری = دقت بیشتر
       if (locked) {
-        this.yaw -= e.movementX * 0.0022;
-        this.pitch = THREE.MathUtils.clamp(this.pitch - e.movementY * 0.0022, -1.45, 1.45);
+        this.yaw -= e.movementX * sens;
+        this.pitch = THREE.MathUtils.clamp(this.pitch - e.movementY * sens, -1.45, 1.45);
       } else if (this.dragLook) {
         // حالت کشیدنی (وقتی مرورگر اجازه‌ی قفل ماوس نمی‌دهد)
-        this.yaw -= (e.clientX - this.lastMX) * 0.0042;
-        this.pitch = THREE.MathUtils.clamp(this.pitch - (e.clientY - this.lastMY) * 0.0042, -1.45, 1.45);
+        const ds = 0.0042 * (1 - this.adsK * 0.45);
+        this.yaw -= (e.clientX - this.lastMX) * ds;
+        this.pitch = THREE.MathUtils.clamp(this.pitch - (e.clientY - this.lastMY) * ds, -1.45, 1.45);
         this.lastMX = e.clientX;
         this.lastMY = e.clientY;
       }
     }) as EventListener);
 
     on(document, "mousedown", ((e: MouseEvent) => {
-      if (e.button !== 0 || this.state !== "play") return;
+      if (this.state !== "play") return;
+      if (e.button === 2) {
+        // نشانه‌گیری روی شانه (ADS)
+        e.preventDefault();
+        this.adsDown = true;
+        return;
+      }
+      if (e.button !== 0) return;
       const locked = document.pointerLockElement === this.renderer.domElement;
       this.mouseDown = true;
       this.mousePressed = true;
@@ -3099,7 +3116,8 @@ export class GameEngine {
         this.lastMY = e.clientY;
       }
     }) as EventListener);
-    on(document, "mouseup", (() => {
+    on(document, "mouseup", ((e: MouseEvent) => {
+      if ((e as MouseEvent).button === 2) this.adsDown = false;
       this.mouseDown = false;
       this.dragLook = false;
     }) as EventListener);
