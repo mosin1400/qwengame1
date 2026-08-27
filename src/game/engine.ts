@@ -70,6 +70,37 @@ export interface HudState {
 
 type EType = "rifle" | "runner" | "heavy";
 
+/** گونه‌ی سلاح سربازها (دشمن و هم‌رزم) */
+export type WKind = "ak" | "smg" | "shotgun" | "pistol" | "lmg" | "knife";
+
+/** ریگ استخوانی دستی — انیمیشن مستقیم روی استخوان‌ها، بدون وابستگی به کلیپ */
+interface BoneRig {
+  hips: THREE.Object3D | null;
+  chest: THREE.Object3D | null;
+  head: THREE.Object3D | null;
+  armL: THREE.Object3D | null;
+  armR: THREE.Object3D | null;
+  foreL: THREE.Object3D | null;
+  foreR: THREE.Object3D | null;
+  legL: THREE.Object3D | null;
+  legR: THREE.Object3D | null;
+  kneeL: THREE.Object3D | null;
+  kneeR: THREE.Object3D | null;
+  handR: THREE.Object3D | null;
+  hipsY: number;
+  phase: number;
+  aimK: number;
+  recoil: number;
+}
+
+function pickWeaponKind(team: "enemy" | "ally", etype: EType, nameIdx: number): WKind {
+  if (team === "ally") return (["ak", "shotgun", "smg", "pistol"] as const)[nameIdx % 4];
+  if (etype === "runner") return "knife";
+  if (etype === "heavy") return Math.random() < 0.7 ? "lmg" : "shotgun";
+  const r = Math.random();
+  return r < 0.55 ? "ak" : r < 0.8 ? "smg" : "shotgun";
+}
+
 interface Soldier {
   id: number;
   team: "enemy" | "ally";
@@ -78,13 +109,8 @@ interface Soldier {
   root: THREE.Group;
   visual: THREE.Group;
   rig: ProcRig | null;
-  mixer: THREE.AnimationMixer | null;
-  actions: {
-    idle: THREE.AnimationAction | null;
-    walk: THREE.AnimationAction | null;
-    run: THREE.AnimationAction | null;
-  };
-  band: "idle" | "walk" | "run";
+  bones: BoneRig | null;
+  wkind: WKind;
   hitMeshes: THREE.Mesh[];
   hp: number;
   maxHp: number;
@@ -578,48 +604,124 @@ export class GameEngine {
   private makeFallbackStall(i: number): THREE.Group {
     const canopyCols = [0xa83232, 0x3a6a8a, 0xc9a23a, 0x4a7a4a];
     const stall = new THREE.Group();
-    const base = new THREE.Mesh(new THREE.BoxGeometry(3.6, 1.1, 1.8), new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.95 }));
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x7a5c34, roughness: 0.95 });
+    const base = new THREE.Mesh(new THREE.BoxGeometry(3.6, 1.1, 1.8), woodMat);
     base.position.y = 0.55;
     base.castShadow = true;
     base.receiveShadow = true;
     stall.add(base);
-    const canopy = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.12, 2.6), new THREE.MeshStandardMaterial({ color: canopyCols[i % canopyCols.length], roughness: 0.9 }));
-    canopy.position.set(0, 2.35, 0);
-    canopy.rotation.x = 0.18;
-    canopy.castShadow = true;
-    stall.add(canopy);
+    // سایه‌بان راه‌راه
+    const c1 = canopyCols[i % canopyCols.length];
+    const c2 = 0xe8ddc0;
+    for (let k = 0; k < 4; k++) {
+      const stripe = new THREE.Mesh(
+        new THREE.BoxGeometry(4.2 / 4 + 0.01, 0.1, 2.6),
+        new THREE.MeshStandardMaterial({ color: k % 2 === 0 ? c1 : c2, roughness: 0.9 })
+      );
+      stripe.position.set(-2.1 + (k + 0.5) * (4.2 / 4), 2.35, 0);
+      stripe.rotation.x = 0.18;
+      stripe.castShadow = true;
+      stall.add(stripe);
+    }
     for (const px of [-1.9, 1.9]) {
       const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 2.35, 6), new THREE.MeshStandardMaterial({ color: 0x4a3a22, roughness: 0.9 }));
       pole.position.set(px, 1.17, 1.1);
       stall.add(pole);
     }
+    // اجناس روی پیشخوان
+    const goodsCols = [0xc9a23a, 0xa83232, 0x4a7a4a, 0xd8b06a];
+    for (let k = 0; k < 5; k++) {
+      const gd = new THREE.Mesh(
+        new THREE.BoxGeometry(0.3 + Math.random() * 0.2, 0.24, 0.3),
+        new THREE.MeshStandardMaterial({ color: goodsCols[(i + k) % goodsCols.length], roughness: 0.9 })
+      );
+      gd.position.set(-1.3 + k * 0.65, 1.22, 0.2 + (k % 2) * 0.3);
+      gd.rotation.y = Math.random();
+      gd.castShadow = true;
+      stall.add(gd);
+    }
     return stall;
   }
 
-  private makeFallbackContainer(color: number): THREE.Mesh {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(6.4, 2.6, 2.5), new THREE.MeshStandardMaterial({ color, roughness: 0.8, metalness: 0.25 }));
-    m.position.y = 1.3;
-    m.castShadow = true;
-    m.receiveShadow = true;
-    return m;
+  private makeFallbackContainer(color: number): THREE.Group {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.8, metalness: 0.25 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x26262a, roughness: 0.7, metalness: 0.3 });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(6.4, 2.6, 2.5), mat);
+    body.position.y = 1.3;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    // موج‌های ورق بدنه
+    for (let k = 0; k < 9; k++) {
+      const rib = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.4, 2.56), dark);
+      rib.position.set(-2.8 + k * 0.7, 1.3, 0);
+      g.add(rib);
+    }
+    // ستون‌های گوشه و درب
+    for (const cx of [-3.15, 3.15]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 2.6, 2.56), dark);
+      post.position.set(cx, 1.3, 0);
+      g.add(post);
+    }
+    const door = new THREE.Mesh(new THREE.BoxGeometry(0.08, 2.3, 2.2), dark);
+    door.position.set(3.24, 1.25, 0);
+    g.add(door);
+    return g;
   }
 
   private makeFallbackHouse(color: number): THREE.Group {
     const g = new THREE.Group();
     const w = 14;
     const d = 11;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(w, 5, d), new THREE.MeshStandardMaterial({ color, roughness: 0.95 }));
+    const wallMat = new THREE.MeshStandardMaterial({ color, roughness: 0.95 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x241f18, roughness: 1 });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(w, 5, d), wallMat);
     body.position.y = 2.5;
     body.castShadow = true;
     body.receiveShadow = true;
     g.add(body);
+    // سقف نیمه‌فروریخته
     const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 1, 0.5, d + 1), new THREE.MeshStandardMaterial({ color: 0x6e5a40, roughness: 1 }));
-    roof.position.y = 5.25;
+    roof.position.set(-0.6, 5.25, 0.3);
+    roof.rotation.z = 0.05;
+    roof.rotation.y = 0.03;
     roof.castShadow = true;
     g.add(roof);
-    const door = new THREE.Mesh(new THREE.BoxGeometry(1.6, 2.6, 0.3), new THREE.MeshStandardMaterial({ color: 0x4a3620, roughness: 0.9 }));
+    // پنجره‌ها (حفره‌ی تاریک + قاب)
+    const frameMat = new THREE.MeshStandardMaterial({ color: 0x4a3620, roughness: 0.9 });
+    for (const [wx, wz, ry] of [[-4, -d / 2 - 0.05, 0], [4, -d / 2 - 0.05, 0], [-w / 2 - 0.05, 0, Math.PI / 2]] as Array<[number, number, number]>) {
+      const hole = new THREE.Mesh(new THREE.BoxGeometry(1.7, 1.7, 0.25), darkMat);
+      hole.position.set(wx, 3.1, wz);
+      hole.rotation.y = ry;
+      g.add(hole);
+      const sill = new THREE.Mesh(new THREE.BoxGeometry(2, 0.16, 0.4), frameMat);
+      sill.position.set(wx, 2.2, wz);
+      sill.rotation.y = ry;
+      g.add(sill);
+    }
+    // درگاه
+    const door = new THREE.Mesh(new THREE.BoxGeometry(1.6, 2.6, 0.3), frameMat);
     door.position.set(0, 1.3, -d / 2 - 0.12);
     g.add(door);
+    // ترک و میلگرد و آوار پای دیوار
+    const crack = new THREE.Mesh(new THREE.BoxGeometry(0.12, 3.4, 0.1), darkMat);
+    crack.position.set(5.5, 2.6, -d / 2 - 0.02);
+    crack.rotation.z = 0.28;
+    g.add(crack);
+    for (let k = 0; k < 3; k++) {
+      const rb = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 1.4, 5), new THREE.MeshStandardMaterial({ color: 0x6a4a3a, roughness: 0.6, metalness: 0.5 }));
+      rb.position.set(-5 + k * 1.2, 5.6, 1.5 - k);
+      rb.rotation.set(0.4 + k * 0.3, 0, -0.5 + k * 0.4);
+      g.add(rb);
+    }
+    for (let k = 0; k < 4; k++) {
+      const rub = new THREE.Mesh(new THREE.DodecahedronGeometry(0.3 + Math.random() * 0.3, 0), wallMat);
+      rub.position.set(-6 + k * 3.5 + Math.random(), 0.25, -d / 2 - 1 + Math.random());
+      rub.rotation.set(Math.random() * 3, Math.random() * 3, 0);
+      rub.castShadow = true;
+      g.add(rub);
+    }
     return g;
   }
 
@@ -633,34 +735,81 @@ export class GameEngine {
     return m;
   }
 
-  private makeFallbackCrate(s: number): THREE.Mesh {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), new THREE.MeshStandardMaterial({ color: 0x8a6b3f, roughness: 0.95 }));
-    m.position.y = s / 2;
-    m.castShadow = true;
-    m.receiveShadow = true;
-    return m;
+  private makeFallbackCrate(s: number): THREE.Group {
+    const g = new THREE.Group();
+    const wood = new THREE.MeshStandardMaterial({ color: 0x8a6b3f, roughness: 0.95 });
+    const darkWood = new THREE.MeshStandardMaterial({ color: 0x5e4828, roughness: 0.95 });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), wood);
+    body.position.y = s / 2;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    // تخته‌ها و مهاربند
+    for (const fy of [0.18, 0.5, 0.82]) {
+      const plank = new THREE.Mesh(new THREE.BoxGeometry(s + 0.04, s * 0.12, s + 0.04), darkWood);
+      plank.position.y = s * fy;
+      g.add(plank);
+    }
+    const brace = new THREE.Mesh(new THREE.BoxGeometry(0.08, s * 1.35, 0.08), darkWood);
+    brace.position.set(0, s / 2, s / 2 + 0.03);
+    brace.rotation.z = 0.72;
+    g.add(brace);
+    return g;
   }
 
-  private makeFallbackBarrel(): THREE.Mesh {
-    const m = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.46, 1.05, 12), new THREE.MeshStandardMaterial({ color: 0x6a4632, roughness: 0.75, metalness: 0.2 }));
+  private makeFallbackBarrel(): THREE.Group {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: 0x6a4632, roughness: 0.75, metalness: 0.2 });
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.46, 1.05, 12), mat);
     m.position.y = 0.52;
     m.castShadow = true;
-    return m;
+    g.add(m);
+    const ringMat = new THREE.MeshStandardMaterial({ color: 0x3e2c1e, roughness: 0.6, metalness: 0.35 });
+    for (const ry of [0.22, 0.52, 0.82]) {
+      const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.465, 0.465, 0.05, 12), ringMat);
+      ring.position.y = ry;
+      g.add(ring);
+    }
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.05, 8), ringMat);
+    cap.position.set(0.15, 1.06, 0.1);
+    g.add(cap);
+    return g;
   }
 
-  private makeFallbackPallet(): THREE.Mesh {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.14, 1.5), new THREE.MeshStandardMaterial({ color: 0x8a6b3f, roughness: 0.95 }));
-    m.position.y = 0.07;
-    m.castShadow = true;
-    return m;
+  private makeFallbackPallet(): THREE.Group {
+    const g = new THREE.Group();
+    const wood = new THREE.MeshStandardMaterial({ color: 0x8a6b3f, roughness: 0.95 });
+    for (let k = 0; k < 5; k++) {
+      const top = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.05, 0.24), wood);
+      top.position.set(0, 0.14, -0.6 + k * 0.3);
+      top.castShadow = true;
+      g.add(top);
+    }
+    for (const bx of [-0.55, 0, 0.55]) {
+      const block = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.1, 1.5), wood);
+      block.position.set(bx, 0.05, 0);
+      g.add(block);
+    }
+    return g;
   }
 
-  private makeFallbackSandbag(): THREE.Mesh {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(4, 1, 0.9), new THREE.MeshStandardMaterial({ color: 0xb3a276, roughness: 1 }));
-    m.position.y = 0.5;
-    m.castShadow = true;
-    m.receiveShadow = true;
-    return m;
+  private makeFallbackSandbag(): THREE.Group {
+    const g = new THREE.Group();
+    const bagMat = new THREE.MeshStandardMaterial({ color: 0xb3a276, roughness: 1 });
+    const bagMat2 = new THREE.MeshStandardMaterial({ color: 0xa3946a, roughness: 1 });
+    for (let row = 0; row < 2; row++) {
+      for (let k = 0; k < 4; k++) {
+        const bag = new THREE.Mesh(new THREE.CapsuleGeometry(0.2, 0.55, 4, 8), row % 2 === 0 ? bagMat : bagMat2);
+        bag.rotation.z = Math.PI / 2;
+        bag.rotation.y = (Math.random() - 0.5) * 0.25;
+        bag.position.set(-1.35 + k * 0.9 + (row % 2) * 0.4, 0.22 + row * 0.4, (Math.random() - 0.5) * 0.12);
+        bag.scale.y = 0.85;
+        bag.castShadow = true;
+        bag.receiveShadow = true;
+        g.add(bag);
+      }
+    }
+    return g;
   }
 
   private makeFallbackTower(): THREE.Group {
@@ -808,6 +957,163 @@ export class GameEngine {
       this.cirCols.push({ x: 7.5, z: i * 42, r: 0.25 });
       this.cirCols.push({ x: i * 42, z: -7.5, r: 0.25 });
     }
+    // دیوارهای خرابه
+    const walls: Array<[number, number, number]> = [
+      [-60, 40, 0.4], [50, 55, -1.2], [-45, -55, 2.2], [62, -38, 0.9],
+      [-30, 95, 1.8], [95, 60, -0.6], [-95, -30, 0.2], [35, 120, 2.6],
+    ];
+    walls.forEach(([x, z, ry], i) => {
+      const gw = this.makeRuinWall(i);
+      gw.position.set(x, 0, z);
+      gw.rotation.y = ry;
+      this.scene.add(gw);
+      const dx = Math.sin(ry) * 2.2;
+      const dz = Math.cos(ry) * 2.2;
+      this.cirCols.push({ x: x + dx, z: z + dz, r: 1.6 }, { x: x - dx, z: z - dz, r: 1.6 });
+      const blk = new THREE.Mesh(new THREE.BoxGeometry(6.5, 3.4, 0.6), new THREE.MeshBasicMaterial({ visible: false }));
+      blk.position.set(x, 1.7, z);
+      blk.rotation.y = ry;
+      this.scene.add(blk);
+      this.blockers.push(blk);
+    });
+    // لاشه‌ی خودروهای سوخته
+    const wrecks: Array<[number, number, number]> = [[4.5, -60, 0.35], [-3.5, 70, 2.8], [60, 4.5, 1.7], [-70, -3.5, 1.2], [115, -70, 0.8]];
+    for (const [x, z, ry] of wrecks) {
+      const car = this.makeCarWreck();
+      car.position.set(x, 0, z);
+      car.rotation.y = ry;
+      this.scene.add(car);
+      this.boxCols.push({ x, z, hw: 2.3, hd: 1.3 });
+    }
+    // گودال‌های انفجار
+    const craters: Array<[number, number, number]> = [[20, -25, 2.4], [-28, 18, 2], [85, -105, 3], [-100, 105, 2.6], [120, 120, 2.2], [-20, -90, 2.8]];
+    for (const [x, z, r] of craters) {
+      const cr = this.makeCrater(r);
+      cr.position.set(x, 0, z);
+      this.scene.add(cr);
+    }
+    // توده‌های آوار
+    for (let i = 0; i < 10; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const rr = 30 + Math.random() * 120;
+      const x = Math.cos(a) * rr;
+      const z = Math.sin(a) * rr;
+      if (this.pointBlocked(x, z, 1)) continue;
+      const rp = this.makeRubblePile();
+      rp.position.set(x, 0, z);
+      rp.rotation.y = Math.random() * 6;
+      this.scene.add(rp);
+      this.cirCols.push({ x, z, r: 0.9 });
+    }
+  }
+
+  /* --- خرابه‌ها و جزئیات جنگی --- */
+
+  private makeRuinWall(seed: number): THREE.Group {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: 0xa89878, roughness: 1 });
+    const darkM = new THREE.MeshStandardMaterial({ color: 0x4a3f30, roughness: 1 });
+    const seg = (sw: number, sh: number, sd: number, x: number, y: number, z: number, m = mat) => {
+      const mm = new THREE.Mesh(new THREE.BoxGeometry(sw, sh, sd), m);
+      mm.position.set(x, y, z);
+      mm.castShadow = true;
+      mm.receiveShadow = true;
+      g.add(mm);
+      return mm;
+    };
+    const len = 5 + (seed % 3);
+    seg(len, 2.6, 0.5, 0, 1.3, 0);
+    seg(len * 0.6, 0.9, 0.5, -len * 0.2, 3.05, 0);
+    seg(len * 0.3, 0.6, 0.5, len * 0.28, 2.9, 0);
+    seg(1.1, 1.2, 0.55, -len * 0.18, 1.7, 0, darkM);
+    for (let i = 0; i < 4; i++) {
+      const r = new THREE.Mesh(new THREE.DodecahedronGeometry(0.28 + Math.random() * 0.22, 0), mat);
+      r.position.set((Math.random() - 0.5) * len, 0.2, (Math.random() - 0.5) * 1.6 + 0.6);
+      r.rotation.set(Math.random() * 3, Math.random() * 3, 0);
+      r.castShadow = true;
+      g.add(r);
+    }
+    const rebarMat = new THREE.MeshStandardMaterial({ color: 0x6a4a3a, roughness: 0.6, metalness: 0.5 });
+    for (let i = 0; i < 3; i++) {
+      const rb = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.9, 5), rebarMat);
+      rb.position.set(-len * 0.3 + i * len * 0.3, 3.3 + (i % 2) * 0.2, 0);
+      rb.rotation.z = (Math.random() - 0.5) * 0.5;
+      g.add(rb);
+    }
+    return g;
+  }
+
+  private makeCarWreck(): THREE.Group {
+    const g = new THREE.Group();
+    const rust = new THREE.MeshStandardMaterial({ color: 0x7a4a32, roughness: 0.95 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x2a2622, roughness: 0.9 });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.7, 4.2), rust);
+    body.position.y = 0.55;
+    body.castShadow = true;
+    g.add(body);
+    const cab = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.6, 1.9), rust);
+    cab.position.set(0.1, 1.1, -0.3);
+    cab.rotation.z = 0.14;
+    cab.rotation.y = 0.06;
+    cab.castShadow = true;
+    g.add(cab);
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.4, 0.08), new THREE.MeshStandardMaterial({ color: 0x1a2026, roughness: 0.3 }));
+    glass.position.set(0.05, 1.15, -1.28);
+    glass.rotation.z = 0.14;
+    g.add(glass);
+    for (const [wx, wz] of [[-0.95, -1.4], [0.95, -1.4], [-0.95, 1.4], [0.95, 1.4]] as Array<[number, number]>) {
+      const wh = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.38, 0.26, 10), dark);
+      wh.rotation.z = Math.PI / 2;
+      wh.position.set(wx, 0.3, wz);
+      wh.castShadow = true;
+      g.add(wh);
+    }
+    const scorch = new THREE.Mesh(new THREE.CircleGeometry(2.7, 18), new THREE.MeshStandardMaterial({ color: 0x1e1a14, roughness: 1 }));
+    scorch.rotation.x = -Math.PI / 2;
+    scorch.position.y = 0.02;
+    g.add(scorch);
+    return g;
+  }
+
+  private makeCrater(r: number): THREE.Group {
+    const g = new THREE.Group();
+    const rim = new THREE.Mesh(
+      new THREE.TorusGeometry(r, 0.28, 8, 20),
+      new THREE.MeshStandardMaterial({ color: 0x8a7a5c, roughness: 1 })
+    );
+    rim.rotation.x = Math.PI / 2;
+    rim.position.y = 0.12;
+    rim.castShadow = true;
+    g.add(rim);
+    const pit = new THREE.Mesh(new THREE.CircleGeometry(r * 0.95, 18), new THREE.MeshStandardMaterial({ color: 0x35301f, roughness: 1 }));
+    pit.rotation.x = -Math.PI / 2;
+    pit.position.y = 0.03;
+    g.add(pit);
+    for (let i = 0; i < 5; i++) {
+      const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.2 + Math.random() * 0.25, 0), new THREE.MeshStandardMaterial({ color: 0x6e6248, roughness: 1, flatShading: true }));
+      const a = Math.random() * Math.PI * 2;
+      rock.position.set(Math.cos(a) * (r + 0.4), 0.18, Math.sin(a) * (r + 0.4));
+      rock.castShadow = true;
+      g.add(rock);
+    }
+    return g;
+  }
+
+  private makeRubblePile(): THREE.Group {
+    const g = new THREE.Group();
+    const mats = [0x8a7a62, 0x9a8a70, 0x7a6a52].map((c) => new THREE.MeshStandardMaterial({ color: c, roughness: 1, flatShading: true }));
+    for (let i = 0; i < 6; i++) {
+      const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.2 + Math.random() * 0.32, 0), mats[i % mats.length]);
+      rock.position.set((Math.random() - 0.5) * 1.8, 0.16 + Math.random() * 0.25, (Math.random() - 0.5) * 1.8);
+      rock.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+      rock.castShadow = true;
+      g.add(rock);
+    }
+    const rb = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 1.1, 5), new THREE.MeshStandardMaterial({ color: 0x6a4a3a, roughness: 0.6, metalness: 0.5 }));
+    rb.position.set(0.3, 0.5, 0.2);
+    rb.rotation.set(0.5, 0, 0.8);
+    g.add(rb);
+    return g;
   }
 
 
@@ -1157,9 +1463,8 @@ export class GameEngine {
       root,
       visual: new THREE.Group(),
       rig: null,
-      mixer: null,
-      actions: { idle: null, walk: null, run: null },
-      band: "idle",
+      bones: null,
+      wkind: pickWeaponKind(team, etype, nameIdx),
       hitMeshes: [],
       hp: maxHp,
       maxHp,
@@ -1232,6 +1537,183 @@ export class GameEngine {
         if (m.isMesh) (m.material as THREE.MeshStandardMaterial).color.multiply(new THREE.Color(ALLY_TINT));
       });
     }
+    // سلاح متنوع به‌جای تفنگ پیش‌فرض
+    for (const c of rig.gun.children) if (c !== rig.muzzle) c.visible = false;
+    const w = this.makeSoldierWeapon(s.wkind);
+    w.rotation.y = Math.PI; // مدل رویه‌ساز رو به +Z است
+    w.position.set(0, 0, 0.28);
+    rig.gun.add(w);
+  }
+
+  /* ---------- ریگ استخوانی دستی (تضمین ضد تی‌پوز) ----------
+     به‌جای وابستگی به کلیپ‌های انیمیشن، استخوان‌های Mixamo را پیدا
+     می‌کنیم و هر فریم مستقیم می‌چرخانیم: راه‌رفتن، دویدن، نشانه‌گیری
+     و لگد اسلحه. اگر استخوانی پیدا نشود، سرباز رویه‌ساز جایگزین است. */
+
+  private findBone(root: THREE.Object3D, suffixes: string[]): THREE.Object3D | null {
+    let found: THREE.Object3D | null = null;
+    root.traverse((o) => {
+      if (found) return;
+      const n = o.name.toLowerCase().replace(/mixamorig:?/g, "").replace(/[^a-z0-9]/g, "");
+      if (n && suffixes.some((sfx) => n.endsWith(sfx))) found = o;
+    });
+    return found;
+  }
+
+  private setupBones(s: Soldier, model: THREE.Object3D) {
+    const b: BoneRig = {
+      hips: this.findBone(model, ["hips"]),
+      chest: this.findBone(model, ["chest", "spine2", "spine1"]),
+      head: this.findBone(model, ["head"]),
+      armL: this.findBone(model, ["leftarm"]),
+      armR: this.findBone(model, ["rightarm"]),
+      foreL: this.findBone(model, ["leftforearm"]),
+      foreR: this.findBone(model, ["rightforearm"]),
+      legL: this.findBone(model, ["leftupleg"]),
+      legR: this.findBone(model, ["rightupleg"]),
+      kneeL: this.findBone(model, ["leftleg"]),
+      kneeR: this.findBone(model, ["rightleg"]),
+      handR: this.findBone(model, ["righthand"]),
+      hipsY: 0,
+      phase: Math.random() * 10,
+      aimK: 0,
+      recoil: 0,
+    };
+    if (b.hips) b.hipsY = b.hips.position.y;
+    // حالت استراحت: بازوها پایین — مدل هرگز تی‌پوز نمی‌ماند
+    if (b.armR) {
+      b.armR.rotation.set(0, 0, -1.3);
+    }
+    if (b.armL) {
+      b.armL.rotation.set(0, 0, 1.3);
+    }
+    if (b.foreR) b.foreR.rotation.z = -0.12;
+    if (b.foreL) b.foreL.rotation.z = 0.12;
+    s.bones = b;
+    this.attachSoldierWeapon(s);
+  }
+
+  private updateBones(b: BoneRig, dt: number, speed: number, aiming: boolean, isRunner: boolean) {
+    const k = THREE.MathUtils.clamp(speed / (isRunner ? 5.5 : 3.4), 0, 1);
+    b.phase += dt * (4.5 + speed * 1.4);
+    const sw = Math.sin(b.phase);
+    b.aimK += ((aiming ? 1 : 0) - b.aimK) * Math.min(1, dt * 7);
+    const a = b.aimK;
+    const w = 1 - a;
+    if (b.legL && b.legR) {
+      b.legL.rotation.x = sw * 0.8 * k * w + a * 0.05;
+      b.legR.rotation.x = -sw * 0.8 * k * w - a * 0.12;
+    }
+    if (b.kneeL && b.kneeR) {
+      b.kneeL.rotation.x = Math.max(0, -sw) * 1.0 * k * w + a * 0.1;
+      b.kneeR.rotation.x = Math.max(0, sw) * 1.0 * k * w + a * 0.25;
+    }
+    if (b.hips) b.hips.position.y = b.hipsY + Math.abs(Math.cos(b.phase)) * 0.05 * k * w;
+    if (b.chest) b.chest.rotation.x = (0.12 * k + sw * 0.02 * k) * w + 0.06 * a;
+    if (b.head) b.head.rotation.x = -0.08 * a;
+    if (b.armL && b.armR) {
+      const amp = 0.6 * k * w;
+      b.armL.rotation.x = -sw * amp - 1.1 * a;
+      b.armR.rotation.x = sw * amp - 0.5 * a - b.recoil;
+      b.armL.rotation.z = 1.3 * w + 0.55 * a;
+      b.armR.rotation.z = -1.3 * w - 0.7 * a;
+      b.armL.rotation.y = -0.55 * a;
+      b.armR.rotation.y = 0.35 * a;
+    }
+    if (b.foreL && b.foreR) {
+      const eb = 0.4 * k * w;
+      b.foreL.rotation.x = -0.12 * w - Math.max(0, sw) * eb - 0.55 * a;
+      b.foreR.rotation.x = -0.12 * w - Math.max(0, -sw) * eb - 0.3 * a;
+      b.foreL.rotation.z = 0.12 * w - 0.25 * a;
+      b.foreR.rotation.z = -0.12 * w;
+    }
+    b.recoil *= Math.exp(-13 * dt);
+  }
+
+  /* ---------- سلاح سربازها ---------- */
+
+  private attachSoldierWeapon(s: Soldier) {
+    const w = this.makeSoldierWeapon(s.wkind);
+    if (s.bones) {
+      const holder = s.bones.handR ?? s.bones.foreR;
+      if (holder) {
+        w.rotation.x = Math.PI / 2; // لوله هم‌راستای انگشت‌ها
+        w.position.set(0, 0.05, 0.02);
+        holder.add(w);
+        return;
+      }
+    }
+    if (s.rig) {
+      for (const c of s.rig.gun.children) if (c !== s.rig.muzzle) c.visible = false;
+      w.rotation.y = Math.PI;
+      w.position.set(0, 0, 0.28);
+      s.rig.gun.add(w);
+    }
+  }
+
+  private makeSoldierWeapon(kind: WKind): THREE.Group {
+    const slot: SlotName = kind === "pistol" ? "wpn-pistol" : kind === "knife" ? "wpn-knife" : "wpn-ak";
+    const dl = this.bank.instantiate(slot);
+    if (dl) return dl as THREE.Group;
+    return this.buildProcWeapon(kind);
+  }
+
+  /** سلاح رویه‌ساز با جزئیات — لوله رو به -Z */
+  private buildProcWeapon(kind: WKind): THREE.Group {
+    const g = new THREE.Group();
+    const metal = new THREE.MeshStandardMaterial({ color: 0x23262a, roughness: 0.5, metalness: 0.55 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x141619, roughness: 0.4, metalness: 0.6 });
+    const wood = new THREE.MeshStandardMaterial({ color: 0x6e4a26, roughness: 0.85 });
+    const olive = new THREE.MeshStandardMaterial({ color: 0x4a5238, roughness: 0.8 });
+    const B = (bw: number, bh: number, bd: number, m: THREE.Material, x: number, y: number, z: number) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), m);
+      mesh.position.set(x, y, z);
+      g.add(mesh);
+      return mesh;
+    };
+    if (kind === "pistol") {
+      B(0.045, 0.06, 0.24, metal, 0, 0.02, -0.04);
+      const grip = B(0.04, 0.13, 0.06, dark, 0, -0.07, 0.05);
+      grip.rotation.x = 0.3;
+      B(0.02, 0.03, 0.02, dark, 0, 0.06, -0.14);
+    } else if (kind === "knife") {
+      const blade = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.004, 0.028, 0.24, 4),
+        new THREE.MeshStandardMaterial({ color: 0xb8bcc2, roughness: 0.25, metalness: 0.9 })
+      );
+      blade.rotation.x = Math.PI / 2;
+      blade.rotation.y = Math.PI / 4;
+      blade.position.set(0, 0.01, -0.18);
+      g.add(blade);
+      B(0.07, 0.02, 0.02, dark, 0, 0, -0.05);
+      B(0.035, 0.04, 0.13, wood, 0, -0.005, 0.05);
+    } else {
+      const L = kind === "smg" ? 0.62 : kind === "lmg" ? 1.0 : kind === "shotgun" ? 0.95 : 0.88;
+      B(0.06, 0.09, L * 0.5, kind === "lmg" ? olive : metal, 0, 0.02, -L * 0.18);
+      const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, L * 0.55, 8), dark);
+      bar.rotation.x = Math.PI / 2;
+      bar.position.set(0, 0.035, -L * 0.62);
+      g.add(bar);
+      B(0.05, 0.1, L * 0.28, wood, 0, -0.01, L * 0.3);
+      const mag = B(0.05, 0.2, 0.09, kind === "lmg" ? olive : dark, 0, -0.12, -L * 0.12);
+      if (kind === "ak") mag.rotation.x = -0.3;
+      const grip = B(0.045, 0.12, 0.05, wood, 0, -0.09, 0.02);
+      grip.rotation.x = 0.35;
+      B(0.02, 0.05, 0.02, dark, 0, 0.08, -L * 0.85);
+      if (kind === "shotgun") {
+        const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, L * 0.5, 8), metal);
+        tube.rotation.x = Math.PI / 2;
+        tube.position.set(0, 0, -L * 0.6);
+        g.add(tube);
+        B(0.05, 0.05, 0.16, wood, 0, -0.035, -L * 0.5);
+      }
+      if (kind === "lmg") {
+        B(0.09, 0.16, 0.16, olive, 0, -0.1, -L * 0.2);
+        B(0.02, 0.12, 0.02, dark, -0.05, -0.1, -L * 0.7);
+        B(0.02, 0.12, 0.02, dark, 0.05, -0.1, -L * 0.7);
+      }
+    }
+    return g;
   }
 
   /** مدل + کلیپ‌ها از یک parse یکسان — بدون اشتراک‌گذاری کلیپ بین صحنه‌ها */
@@ -1243,15 +1725,6 @@ export class GameEngine {
         g = await new GLTFLoader().parseAsync(this.soldierBuffer, "");
       }
       if (!g || s.gone) return;
-      const usable = (g.animations as THREE.AnimationClip[]).filter(
-        (c) => c.tracks.length > 8 && !/tpose|t-?_?pose/i.test(c.name)
-      );
-      const find = (n: string) =>
-        usable.find((c) => c.name.toLowerCase() === n) ?? usable.find((c) => c.name.toLowerCase().includes(n));
-      const idle = find("idle");
-      const walk = find("walk");
-      const run = find("run");
-      if (!idle || !walk || !run) throw new Error("clips-missing");
       const tint = s.team === "ally" ? ALLY_TINT : TINTS[s.etype];
       const model = g.scene;
       const inner = new THREE.Group();
@@ -1271,14 +1744,8 @@ export class GameEngine {
           }
         }
       });
-      s.mixer = new THREE.AnimationMixer(model);
-      s.actions.idle = s.mixer.clipAction(idle).setLoop(THREE.LoopRepeat, Infinity);
-      s.actions.walk = s.mixer.clipAction(walk).setLoop(THREE.LoopRepeat, Infinity);
-      s.actions.run = s.mixer.clipAction(run).setLoop(THREE.LoopRepeat, Infinity);
-      s.actions.idle.setEffectiveWeight(1).play();
-      s.actions.walk.setEffectiveWeight(0).play();
-      s.actions.run.setEffectiveWeight(0).play();
-      s.mixer.update(0.016);
+      // انیمیشن مستقیم روی استخوان‌ها — تی‌پوز دیگر ممکن نیست
+      this.setupBones(s, model);
     } catch {
       if (!s.rig && !s.gone) this.attachProcedural(s);
     }
@@ -1463,20 +1930,7 @@ export class GameEngine {
     return hit.length === 0;
   }
 
-  private setBand(s: Soldier, band: Soldier["band"]) {
-    s.band = band;
-    for (const key of ["idle", "walk", "run"] as const) {
-      const a = s.actions[key];
-      if (!a) continue;
-      if (key === band) {
-        a.enabled = true;
-        a.setEffectiveTimeScale(1);
-        a.fadeIn(0.25);
-      } else {
-        a.fadeOut(0.25);
-      }
-    }
-  }
+
 
   private enemyFire(e: Soldier, dist: number) {
     const tpos = this.targetPos(e);
@@ -1498,6 +1952,7 @@ export class GameEngine {
       .add(new THREE.Vector3((Math.random() - 0.5) * 2, (Math.random() - 0.5) * 1.4, (Math.random() - 0.5) * 2).multiplyScalar(spread));
     this.addTracer(mPos, end, 0xff9a6a);
     e.flashT = 0.06;
+    if (e.bones) e.bones.recoil = 0.45;
     sfx.enemyShot(THREE.MathUtils.clamp(0.4 - dist * 0.01, 0.04, 0.38));
     if (!hits) return;
     if (isPlayer) this.damagePlayer(ETYPES[e.etype].dmg(this.wave) * (0.75 + Math.random() * 0.5));
@@ -1740,13 +2195,12 @@ export class GameEngine {
       }
     }
 
-    // انیمیشن
-    if (s.mixer) {
-      const band: Soldier["band"] = s.speed < 0.4 ? "idle" : s.speed < (s.etype === "runner" ? 4.5 : 3.1) ? "walk" : "run";
-      if (band !== s.band) this.setBand(s, band);
-      s.mixer.update(dt);
+    // انیمیشن — استخوان‌های دانلودی یا ریگ رویه‌ساز
+    const aimingNow = shooting && (s.los || dist < 14);
+    if (s.bones) {
+      this.updateBones(s.bones, dt, s.speed, aimingNow, s.etype === "runner");
     } else if (s.rig) {
-      animateProcedural(s.rig, s.speed, dt, shooting && (s.los || dist < 14));
+      animateProcedural(s.rig, s.speed, dt, aimingNow);
     }
 
     // فلش
@@ -1844,9 +2298,6 @@ export class GameEngine {
       else if (this.streak >= 5) this.showBanner("افسانه‌ای!!!", "streak");
     }
     sfx.death();
-    if (e.mixer) {
-      for (const key of ["idle", "walk", "run"] as const) e.actions[key]?.fadeOut(0.3);
-    }
     this.emitNow();
   }
 
@@ -2164,7 +2615,7 @@ export class GameEngine {
   private throwGrenade() {
     this.grenades--;
     const g = this.makeGrenadeBody();
-    g.scale.setScalar(0.42);
+    g.scale.setScalar(0.9);
     const origin = new THREE.Vector3();
     this.camera.getWorldPosition(origin);
     const dir = new THREE.Vector3();

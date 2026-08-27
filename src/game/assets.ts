@@ -72,7 +72,7 @@ function findGlbUrl(v: unknown, guard = 0): string | null {
   if (v && typeof v === "object") {
     // اولویت با فیلدهای GLB/glb
     const obj = v as Record<string, unknown>;
-    for (const k of ["GLB", "glb", "GLTF", "gltf", "url", "Url", "download"]) {
+    for (const k of ["Download", "GLB", "glb", "GLTF", "gltf", "url", "Url", "download"]) {
       if (typeof obj[k] === "string") {
         const r = findGlbUrl(obj[k], guard + 1);
         if (r) return r;
@@ -221,8 +221,8 @@ export class AssetBank {
     }
     // ۲) poly.pizza (CC-BY) — دو قالب API امتحان می‌شود
     const endpoints = [
+      `https://api.poly.pizza/v1.1/search/${encodeURIComponent(def.kw)}?Limit=6`,
       `https://api.poly.pizza/v1/search/${encodeURIComponent(def.kw)}?Limit=6`,
-      `https://api.poly.pizza/v1.1/search?Keyword=${encodeURIComponent(def.kw)}&Limit=6`,
     ];
     for (const ep of endpoints) {
       try {

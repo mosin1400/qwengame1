@@ -450,7 +450,7 @@ export default function App() {
               شروع عملیات
             </button>
             <div className="text-center text-[10px] text-[#d8c49a]/50 mt-3 font-medium">
-              اشیای صحنه: Poly Haven — لایسنس CC0 (مالکیت عمومی)
+              اشیای صحنه و سلاح‌ها: Poly Haven (CC0) + poly.pizza (CC-BY) — دانلود زنده هنگام اجرا
             </div>
           </div>
 
