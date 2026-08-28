@@ -1927,19 +1927,21 @@ export class GameEngine {
     const a = b.aimK;
     const w = 1 - a;
     const clamp = THREE.MathUtils.clamp;
-    // پاها — دامنه‌ی محدود + زانو فقط در جهت اندازه‌گیری‌شده (بالا رفتن پا تا کله غیرممکن است)
+    /* پاها — کاملاً مستقل از حالت نشانه‌گیری (مثل راه‌رفتن معمولی)،
+       دامنه‌ی محدود + زانو فقط در جهت اندازه‌گیری‌شده؛
+       بالا رفتن پا تا کله ریاضیاً غیرممکن است. */
     if (b.legL && b.legR) {
-      b.legL.rotation.x = clamp(sw * 0.6 * k * w, -0.62, 0.62);
-      b.legR.rotation.x = clamp(-sw * 0.6 * k * w, -0.62, 0.62);
+      b.legL.rotation.x = clamp(sw * 0.5 * k, -0.52, 0.52);
+      b.legR.rotation.x = clamp(-sw * 0.5 * k, -0.52, 0.52);
     }
     if (b.kneeL && b.kneeR) {
       // زانو هنگام مرحله‌ی تاب خوردن خم می‌شود — گام طبیعی
-      const bendL = Math.max(0, -sw) * 0.85 * k * w;
-      const bendR = Math.max(0, sw) * 0.85 * k * w;
-      b.kneeL.rotation.x = clamp(b.kneeDirL * bendL, -0.95, 0.95);
-      b.kneeR.rotation.x = clamp(b.kneeDirR * bendR, -0.95, 0.95);
+      const bendL = Math.max(0, -sw) * 0.7 * k;
+      const bendR = Math.max(0, sw) * 0.7 * k;
+      b.kneeL.rotation.x = clamp(b.kneeDirL * bendL, -0.85, 0.85);
+      b.kneeR.rotation.x = clamp(b.kneeDirR * bendR, -0.85, 0.85);
     }
-    if (b.hips) b.hips.position.y = b.hipsY + Math.abs(Math.cos(b.phase)) * 0.04 * k * w;
+    if (b.hips) b.hips.position.y = b.hipsY + Math.abs(Math.cos(b.phase)) * 0.04 * k;
     // تنه: خم جزئی به جلو + تاب خوردن هنگام قدم
     if (b.chest) {
       b.chest.rotation.x = 0.08 * k * w + 0.12 * a;
@@ -1957,23 +1959,6 @@ export class GameEngine {
     if (b.foreL) b.foreL.rotation.x = -0.25 * w - 0.65 * a;
     if (b.foreR) b.foreR.rotation.x = -0.25 * w - 0.4 * a;
     b.recoil *= Math.exp(-13 * dt);
-  }
-
-  /* ---------- تعویض نرم انیمیشن Mixamo ---------- */
-
-  private setBand(s: Soldier, band: Soldier["band"]) {
-    s.band = band;
-    for (const key of ["idle", "walk", "run"] as const) {
-      const a = s.actions[key];
-      if (!a) continue;
-      if (key === band) {
-        a.enabled = true;
-        a.setEffectiveTimeScale(1);
-        a.fadeIn(0.22);
-      } else {
-        a.fadeOut(0.22);
-      }
-    }
   }
 
   /* ---------- سلاح سربازها (نسخه‌ی رویه‌ساز) ---------- */
@@ -2900,31 +2885,10 @@ export class GameEngine {
       }
     }
 
-    // انیمیشن — اول کلیپ واقعی Mixamo، بعد ریگ استخوانی، بعد رویه‌ساز
+    // انیمیشن — ریگ استخوانی اندازه‌گیری‌شده (مدل دانلودی) یا رویه‌ساز؛
+    // دیگر هیچ وابستگی به کلیپ انیمیشن نیست، پس جهت‌ها هرگز برعکس نمی‌شوند.
     const aimingNow = shooting && (s.los || dist < 14);
-    if (s.mixer) {
-      const band: Soldier["band"] = s.speed < 0.4 ? "idle" : s.speed < (s.etype === "runner" ? 4.5 : 3.1) ? "walk" : "run";
-      if (band !== s.band) this.setBand(s, band);
-      s.mixer.update(dt);
-      /* واچ‌داگ: اگر میکسر واقعاً پاها را تکان ندهد، ریگ استخوانی جایگزین می‌شود
-         تا راه‌رفتن در همه‌ی محیط‌ها تضمین شود */
-      if (s.bones?.legL) {
-        if (s.speed > 0.6) {
-          const lr = s.bones.legL.rotation.x;
-          if (Math.abs(lr - s.lastLegRot) > 0.012) {
-            s.lastLegRot = lr;
-            s.animT = 0;
-          } else {
-            s.animT += dt;
-            if (s.animT > 1.0) {
-              s.mixer = null;
-              s.band = "idle";
-              s.animT = 0;
-            }
-          }
-        }
-      }
-    } else if (s.bones) {
+    if (s.bones) {
       this.updateBones(s.bones, dt, s.speed, aimingNow, s.etype === "runner");
     } else if (s.rig) {
       animateProcedural(s.rig, s.speed, dt, aimingNow);
