@@ -1897,25 +1897,33 @@ export class GameEngine {
     return bestZ;
   }
 
-  /** جهت خم شدن زانو را اندازه می‌گیرد: خمِ طبیعی، مچ پا را پایین نگه می‌دارد */
+  /** جهت طبیعی خم شدن زانو را اندازه می‌گیرد.
+      نکته‌ی کلیدی: با پای صاف نمی‌شود جهت را تشخیص داد (خمِ اشتباه پا را پایین نگه می‌دارد).
+      پس ران را تا هر دو حدِ جلو/عقب می‌تابانیم و جهتی را برمی‌گزینیم که حتی در بدترین حالت
+      هم مچ پا را پایین نگه دارد — این یعنی پا هرگز به سمت کله بالا نمی‌رود. */
   private measureKneeDir(model: THREE.Object3D, knee: THREE.Object3D | null, thigh: THREE.Object3D | null): number {
     if (!knee) return -1;
     const probe = this.findBone(knee, ["foot", "toe"]) ?? knee;
     const tmp = new THREE.Vector3();
     let bestDir = -1;
-    let bestY = Infinity;
+    let bestWorst = Infinity;
     for (const dir of [-1, 1]) {
-      knee.rotation.x = dir * 0.85;
-      model.updateMatrixWorld(true);
-      probe.getWorldPosition(tmp);
-      if (tmp.y < bestY) {
-        bestY = tmp.y;
+      let worst = -Infinity;
+      for (const t of [0.5, -0.5]) {
+        if (thigh) thigh.rotation.x = t;
+        knee.rotation.x = dir * 0.55;
+        model.updateMatrixWorld(true);
+        probe.getWorldPosition(tmp);
+        if (tmp.y > worst) worst = tmp.y;
+      }
+      if (worst < bestWorst) {
+        bestWorst = worst;
         bestDir = dir;
       }
     }
     knee.rotation.x = 0;
+    if (thigh) thigh.rotation.x = 0;
     model.updateMatrixWorld(true);
-    void thigh;
     return bestDir;
   }
 
