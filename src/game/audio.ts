@@ -188,6 +188,104 @@ export class SFX {
       this.windGain = null;
     }
   }
+  /* ---------- جدید: موسیقی و افکت‌های سلاح ---------- */
+
+  private musicNodes: AudioNode[] = [];
+  private musicGain: GainNode | null = null;
+
+  setVolume(v: number) {
+    if (this.master) this.master.gain.value = Math.max(0, Math.min(1, v));
+  }
+
+  startMusic() {
+    if (!this.ctx || !this.master || this.musicGain) return;
+    const c = this.ctx;
+    const g = c.createGain();
+    g.gain.value = 0.055;
+    g.connect(this.master);
+    this.musicGain = g;
+    // درونِ بم و کشدار
+    for (const f of [55, 55.6, 110.4]) {
+      const o = c.createOscillator();
+      o.type = "sawtooth";
+      o.frequency.value = f;
+      const lp = c.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.value = 240;
+      const og = c.createGain();
+      og.gain.value = f > 100 ? 0.25 : 0.6;
+      o.connect(lp).connect(og).connect(g);
+      o.start();
+      this.musicNodes.push(o);
+    }
+    // پالس تنش — نویز فیلترشده با LFO
+    const n = c.createBufferSource();
+    n.buffer = this.noise;
+    n.loop = true;
+    const bp = c.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.value = 420;
+    bp.Q.value = 1.6;
+    const ng = c.createGain();
+    ng.gain.value = 0.12;
+    const lfo = c.createOscillator();
+    lfo.frequency.value = 0.09;
+    const lfoG = c.createGain();
+    lfoG.gain.value = 0.1;
+    lfo.connect(lfoG).connect(ng.gain);
+    n.connect(bp).connect(ng).connect(g);
+    n.start();
+    lfo.start();
+    this.musicNodes.push(n, lfo);
+  }
+
+  stopMusic() {
+    for (const n of this.musicNodes) {
+      try {
+        (n as OscillatorNode).stop?.();
+      } catch {
+        /* ignore */
+      }
+      n.disconnect();
+    }
+    this.musicNodes = [];
+    if (this.musicGain) {
+      this.musicGain.disconnect();
+      this.musicGain = null;
+    }
+  }
+
+  pump() {
+    this.tone(340, 220, 0.12, 0.05, "square");
+    setTimeout(() => this.noiseBurst({ peak: 0.12, decay: 0.06, from: 2400, to: 600 }), 140);
+    setTimeout(() => this.tone(260, 180, 0.1, 0.05, "square"), 300);
+  }
+
+  bolt() {
+    this.tone(900, 700, 0.1, 0.04, "square");
+    setTimeout(() => this.tone(520, 380, 0.12, 0.06, "square"), 120);
+    setTimeout(() => this.noiseBurst({ peak: 0.08, decay: 0.05, from: 4000, to: 1200 }), 260);
+  }
+
+  beep() {
+    this.tone(880, 880, 0.1, 0.1, "sine");
+  }
+
+  metal() {
+    this.tone(1600, 900, 0.1, 0.06, "square");
+    this.noiseBurst({ peak: 0.08, decay: 0.05, from: 6000, to: 2000, type: "highpass" });
+  }
+
+  bigExplosion() {
+    this.noiseBurst({ peak: 0.7, decay: 0.9, from: 900, to: 60 });
+    this.tone(90, 30, 0.4, 0.8, "triangle");
+    this.noiseBurst({ peak: 0.3, decay: 0.3, from: 3000, to: 200 });
+  }
+
+  achv() {
+    this.tone(660, 660, 0.09, 0.12, "sine");
+    setTimeout(() => this.tone(990, 990, 0.09, 0.16, "sine"), 110);
+  }
 }
 
 export const sfx = new SFX();
