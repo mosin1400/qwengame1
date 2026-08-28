@@ -129,6 +129,8 @@ interface BoneRig {
   /** چرخش استراحتِ اندازه‌گیری‌شده‌ی بازوها (دست‌ها پایین — ضد تی‌پوز) */
   armRestL: number;
   armRestR: number;
+  kneeDirL: number;
+  kneeDirR: number;
 }
 
 function pickWeaponKind(team: "enemy" | "ally", etype: EType, nameIdx: number): WKind {
@@ -1844,12 +1846,22 @@ export class GameEngine {
       recoil: 0,
       armRestL: 0,
       armRestR: 0,
+      kneeDirL: -1,
+      kneeDirR: -1,
     };
     if (b.hips) b.hipsY = b.hips.position.y;
     // حالت استراحت با اندازه‌گیری: هر چرخشی که دست را پایین‌تر بیاورد انتخاب می‌شود.
     // این روش مستقل از جهت استخوان‌هاست و تی‌پوز را غیرممکن می‌کند.
     b.armRestL = this.measureArmRest(model, b.armL, b.handL);
     b.armRestR = this.measureArmRest(model, b.armR, b.handR);
+    // جهت خم شدن زانو با اندازه‌گیری: جهتی که پا را «پایین/عقب» نگه دارد طبیعی است؛
+    // جهت برعکس پا را تا کله بالا می‌برد — پس هرگز حدس نمی‌زنیم.
+    b.kneeDirL = this.measureKneeDir(model, b.kneeL, b.legL);
+    b.kneeDirR = this.measureKneeDir(model, b.kneeR, b.legR);
+    if (b.kneeL) b.kneeL.rotation.x = 0;
+    if (b.kneeR) b.kneeR.rotation.x = 0;
+    if (b.legL) b.legL.rotation.x = 0;
+    if (b.legR) b.legR.rotation.x = 0;
     if (b.foreR) b.foreR.rotation.x = -0.25;
     if (b.foreL) b.foreL.rotation.x = -0.25;
     // اسلحه در استخوان دست — در هر حالتی (میکسر، ریگ، سکون) تفنگ دست سرباز است
@@ -1885,21 +1897,47 @@ export class GameEngine {
     return bestZ;
   }
 
+  /** جهت خم شدن زانو را اندازه می‌گیرد: خمِ طبیعی، مچ پا را پایین نگه می‌دارد */
+  private measureKneeDir(model: THREE.Object3D, knee: THREE.Object3D | null, thigh: THREE.Object3D | null): number {
+    if (!knee) return -1;
+    const probe = this.findBone(knee, ["foot", "toe"]) ?? knee;
+    const tmp = new THREE.Vector3();
+    let bestDir = -1;
+    let bestY = Infinity;
+    for (const dir of [-1, 1]) {
+      knee.rotation.x = dir * 0.85;
+      model.updateMatrixWorld(true);
+      probe.getWorldPosition(tmp);
+      if (tmp.y < bestY) {
+        bestY = tmp.y;
+        bestDir = dir;
+      }
+    }
+    knee.rotation.x = 0;
+    model.updateMatrixWorld(true);
+    void thigh;
+    return bestDir;
+  }
+
   private updateBones(b: BoneRig, dt: number, speed: number, aiming: boolean, isRunner: boolean) {
     const k = THREE.MathUtils.clamp(speed / (isRunner ? 5.5 : 3.4), 0, 1);
-    b.phase += dt * (4.5 + speed * 1.4);
+    b.phase += dt * (4.2 + speed * 1.5);
     const sw = Math.sin(b.phase);
     b.aimK += ((aiming ? 1 : 0) - b.aimK) * Math.min(1, dt * 7);
     const a = b.aimK;
     const w = 1 - a;
-    // پاها
+    const clamp = THREE.MathUtils.clamp;
+    // پاها — دامنه‌ی محدود + زانو فقط در جهت اندازه‌گیری‌شده (بالا رفتن پا تا کله غیرممکن است)
     if (b.legL && b.legR) {
-      b.legL.rotation.x = sw * 0.55 * k * w;
-      b.legR.rotation.x = -sw * 0.55 * k * w;
+      b.legL.rotation.x = clamp(sw * 0.6 * k * w, -0.62, 0.62);
+      b.legR.rotation.x = clamp(-sw * 0.6 * k * w, -0.62, 0.62);
     }
     if (b.kneeL && b.kneeR) {
-      b.kneeL.rotation.x = Math.max(0, -sw) * 0.7 * k * w;
-      b.kneeR.rotation.x = Math.max(0, sw) * 0.7 * k * w;
+      // زانو هنگام مرحله‌ی تاب خوردن خم می‌شود — گام طبیعی
+      const bendL = Math.max(0, -sw) * 0.85 * k * w;
+      const bendR = Math.max(0, sw) * 0.85 * k * w;
+      b.kneeL.rotation.x = clamp(b.kneeDirL * bendL, -0.95, 0.95);
+      b.kneeR.rotation.x = clamp(b.kneeDirR * bendR, -0.95, 0.95);
     }
     if (b.hips) b.hips.position.y = b.hipsY + Math.abs(Math.cos(b.phase)) * 0.04 * k * w;
     // تنه: خم جزئی به جلو + تاب خوردن هنگام قدم
@@ -1909,7 +1947,7 @@ export class GameEngine {
     }
     if (b.head) b.head.rotation.x = -0.1 * a;
     // بازوها: استراحت (پایین) / نوسان راه‌رفتن / ژست نشانه‌گیری با تفنگ
-    const amp = 0.45 * k * w;
+    const amp = 0.4 * k * w;
     if (b.armL) {
       b.armL.rotation.set(-sw * amp - 1.25 * a, -0.35 * a, b.armRestL * w + 0.2 * a);
     }
@@ -2033,45 +2071,12 @@ export class GameEngine {
           }
         }
       });
-      // ۱) حالت استراحت (دست‌ها پایین) — حتی اگر انیمیشن کار نکرد، تی‌پوز نمی‌شود
+      // حالت استراحت + جهت‌های اندازه‌گیری‌شده (دست‌ها پایین، زانوی طبیعی)
+      // انیمیشن کاملاً توسط ریگ استخوانی خودمان رانده می‌شود — بدون وابستگی به کلیپ
       this.setupBones(s, model);
-
-      // ۲) انیمیشن واقعی Mixamo — کلیپ‌های Idle/Walk/Run از همان parse
-      const clips = (g.animations as THREE.AnimationClip[]).filter(
-        (c) => c.tracks.length > 8 && !/tpose|t-?_?pose/i.test(c.name)
-      );
-      const find = (n: string) =>
-        clips.find((c) => c.name.toLowerCase() === n) ?? clips.find((c) => c.name.toLowerCase().includes(n));
-      const idle = find("idle");
-      const walk = find("walk");
-      const run = find("run");
-      if (!idle || !walk || !run) throw new Error("mixamo-clips-missing");
-      s.mixer = new THREE.AnimationMixer(model);
-      s.actions.idle = s.mixer.clipAction(idle);
-      s.actions.walk = s.mixer.clipAction(walk);
-      s.actions.run = s.mixer.clipAction(run);
-      s.actions.idle.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(1).play();
-      s.actions.walk.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
-      s.actions.run.setLoop(THREE.LoopRepeat, Infinity).setEffectiveWeight(0).play();
-      s.band = "idle";
-
-      // ۳) اعتبارسنجی: با کلیپ Walk (حرکت زیاد) تست می‌کنیم که میکسر واقعاً
-      //    استخوان‌ها را می‌چرخاند. اگر نه، میکسر را حذف می‌کنیم تا ریگ استخوانی
-      //    (updateBones) با حالت استراحتِ صحیح کنترل را به دست بگیرد.
-      const probe = s.bones?.armR ?? s.bones?.legL ?? s.bones?.chest;
-      if (probe && s.actions.walk) {
-        const before = probe.rotation.x + probe.rotation.y + probe.rotation.z;
-        s.actions.idle.setEffectiveWeight(0);
-        s.actions.walk.setEffectiveWeight(1);
-        s.mixer.update(0.25);
-        const after = probe.rotation.x + probe.rotation.y + probe.rotation.z;
-        s.actions.walk.setEffectiveWeight(0);
-        s.actions.idle.setEffectiveWeight(1);
-        if (Math.abs(after - before) < 0.01) {
-          s.mixer = null; // انیمیشن bind نشد — ریگ استخوانی جایگزین می‌شود
-        }
+      if (!s.bones || (!s.bones.hips && !s.bones.armR && !s.bones.legL)) {
+        throw new Error("no-bones");
       }
-      if (s.mixer) s.mixer.update(0.016);
     } catch {
       // مدل یا کلیپ‌ها ناقص بودند — مدل GLB را بردار و سرباز رویه‌ساز بگذار (هرگز تی‌پوز نمی‌شود)
       if (!s.gone && !s.rig) {
